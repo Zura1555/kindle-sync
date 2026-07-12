@@ -1,6 +1,5 @@
 <p align="center">
-  <!-- TODO: add your logo -->
-  <img src="" alt="logo" width="120">
+  <img src="logo.png" alt="Learn Anything. Review Anywhere." width="120">
 </p>
 
 # Learn Anything. Review Anywhere.
@@ -10,8 +9,7 @@ Two AI agent skills, one repo. **`/teach`** turns any topic into interactive HTM
 Built for [Matt Pocock's skills-for-AI-agents](https://github.com/mattpocock/skills) framework.
 
 <p align="center">
-  <!-- TODO: add side-by-side screenshot (browser lesson + Kindle PDF) -->
-  <img src="" alt="demo" width="100%">
+  <img src="demo.png" alt="Browser lesson on the left, Kindle PDF on the right" width="100%">
 </p>
 
 <p align="center">
