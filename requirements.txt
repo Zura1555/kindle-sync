@@ -1,0 +1,6 @@
+weasyprint>=60.0
+
+# WeasyPrint system dependencies (install separately):
+# Ubuntu/Debian: sudo apt install libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf2.0-0 libffi-dev libcairo2
+# macOS:        brew install pango libffi
+# Fedora:       sudo dnf install pango gcc libffi-devel cairo

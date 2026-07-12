@@ -1,0 +1,4 @@
+.kindle-creds
+lessons/kindle-output/
+__pycache__/
+*.pyc

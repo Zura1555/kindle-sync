@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reference: SQL & PostgreSQL Glossary</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,400..700;1,14..32,400..700&family=JetBrains+Mono:wght@400;700&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Inter',system-ui,sans-serif;line-height:1.7;color:#1a1a1a;background:#fdfbf7;max-width:760px;margin:0 auto;padding:3rem 1.5rem 6rem}
+h1{font-size:2rem;font-weight:700;margin-bottom:.5rem;letter-spacing:-.02em;color:#111}
+h2{font-size:1.35rem;font-weight:700;margin:2rem 0 .75rem;color:#222;border-bottom:2px solid #e8e3d7;padding-bottom:.35rem}
+code{font-family:'JetBrains Mono',monospace;background:#f3f0e9;padding:.1em .35em;border-radius:3px;font-size:.88em;color:#c7254e}
+dl{margin:1rem 0 2rem}
+dt{font-weight:700;font-size:1.05rem;margin:1.2rem 0 .2rem;color:#222}
+dd{margin-left:0;margin-bottom:.8rem;color:#444;font-size:.95rem}
+dd .see{margin-top:.3rem;font-size:.85rem;color:#888}
+.letter{border-top:1px solid #e8e3d7;margin-top:2rem}
+@media print{body{padding:1rem;font-size:11pt}}
+</style>
+</head>
+<body>
+
+<h1>SQL &amp; PostgreSQL Glossary</h1>
+<p style="color:#888;font-size:.9rem">Key terms from the lessons. Designed for quick look-up on browser or Kindle.</p>
+
+<h2>C</h2>
+<dl>
+<dt>camelCase</dt>
+<dd>A naming style where compound words have no separators, and each word after the first starts with a capital letter: <code>customerOrders</code>. Requires double-quoting in PostgreSQL. Not idiomatic for SQL.<span class="see">→ Lesson 0001</span></dd>
+
+<dt>Constraint</dt>
+<dd>A rule enforced by the database on a column or table. Types include <code>NOT NULL</code>, <code>UNIQUE</code>, <code>PRIMARY KEY</code>, <code>FOREIGN KEY</code>, and <code>CHECK</code>.<span class="see">→ Lesson 0001</span></dd>
+</dl>
+
+<h2>F</h2>
+<dl>
+<dt>Foreign Key (FK)</dt>
+<dd>A column that references the primary key of another table. Enforces referential integrity. Naming: <code>{referenced_table}_id</code>.<span class="see">→ Lesson 0001</span></dd>
+</dl>
+
+<h2>P</h2>
+<dl>
+<dt>PascalCase</dt>
+<dd>A naming style where every word starts with a capital letter: <code>CustomerOrders</code>. Like camelCase but with a leading capital. Same quoting problems in PostgreSQL.<span class="see">→ Lesson 0001</span></dd>
+
+<dt>Primary Key (PK)</dt>
+<dd>A column (or set of columns) that uniquely identifies each row. PostgreSQL auto-creates a B-tree index on primary keys.<span class="see">→ Lesson 0001</span></dd>
+</dl>
+
+<h2>Q</h2>
+<dl>
+<dt>Quoted Identifier</dt>
+<dd>An identifier wrapped in double-quotes: <code>"MyTable"</code>. Preserves exact case but must be quoted in every subsequent query — tedious and error-prone. Avoid unless migrating from a case-sensitive database.<span class="see">→ Lesson 0001</span></dd>
+</dl>
+
+<h2>S</h2>
+<dl>
+<dt>snake_case</dt>
+<dd>Lowercase words separated by underscores: <code>customer_orders</code>. The PostgreSQL standard because unquoted identifiers are folded to lowercase. Used by Python, Ruby, and MySQL communities.<span class="see">→ Lesson 0001</span></dd>
+
+<dt>SQL Standard</dt>
+<dd>The ANSI/ISO specification that defines SQL syntax and behavior. PostgreSQL closely follows it. The standard specifies that unquoted identifiers are case-insensitive, which is why PostgreSQL folds to lowercase.<span class="see">→ Lesson 0001</span></dd>
+</dl>
+
+</body>
+</html>

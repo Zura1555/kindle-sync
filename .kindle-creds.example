@@ -1,0 +1,11 @@
+# Kindle Sync credentials
+# Copy this to .kindle-creds and fill in your details.
+# Then: chmod 600 .kindle-creds
+#
+# KINDLE_EMAIL: Find at amazon.com/myk → Devices → Kindle → Send-to-Kindle Email
+# GMAIL_ADDRESS: Your Gmail (add as approved sender in Amazon's Kindle settings)
+# GMAIL_APP_PASSWORD: Generate at myaccount.google.com/apppasswords (requires 2FA)
+
+KINDLE_EMAIL=yourname@kindle.com
+GMAIL_ADDRESS=yourname@gmail.com
+GMAIL_APP_PASSWORD=your-16-char-app-password

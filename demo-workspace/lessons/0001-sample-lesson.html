@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0001: SQL Naming Conventions — Why snake_case?</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,400..700;1,14..32,400..700&family=JetBrains+Mono:wght@400;700&display=swap');
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Inter', system-ui, sans-serif; line-height: 1.7; color: #1a1a1a; background: #fdfbf7; max-width: 720px; margin: 0 auto; padding: 3rem 1.5rem 6rem; }
+  h1 { font-size: 2.2rem; font-weight: 700; margin-bottom: 0.3rem; letter-spacing: -0.02em; color: #111; }
+  h2 { font-size: 1.5rem; font-weight: 700; margin: 2.5rem 0 0.75rem; color: #222; border-bottom: 2px solid #e8e3d7; padding-bottom: 0.35rem; }
+  p { margin-bottom: 1rem; }
+  .mission-callout { background: #fff8e7; border-left: 4px solid #e6a817; padding: 1rem 1.25rem; margin: 1.5rem 0; border-radius: 0 6px 6px 0; font-size: 0.95rem; }
+  .mission-callout strong { color: #b0780a; }
+  code { font-family: 'JetBrains Mono', monospace; background: #f3f0e9; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; color: #c7254e; }
+  pre { background: #2d2a24; color: #f4e9d3; padding: 1.25rem 1.5rem; border-radius: 8px; overflow-x: auto; margin: 1rem 0 1.5rem; font-family: 'JetBrains Mono', monospace; font-size: 0.88rem; line-height: 1.6; }
+  table { width: 100%; border-collapse: collapse; margin: 1.25rem 0 1.75rem; font-size: 0.92rem; }
+  th, td { text-align: left; padding: 0.6rem 0.85rem; border-bottom: 1px solid #e0dbcf; }
+  th { font-weight: 700; background: #f5f2ea; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; color: #555; }
+  tr:hover td { background: #fdf9f0; }
+  .quiz-block { background: #f5f5f0; border: 1px solid #e0dbcf; border-radius: 8px; padding: 1.5rem 1.75rem; margin: 2rem 0; }
+  .quiz-block h3 { margin: 0 0 0.5rem; font-size: 1.1rem; }
+  .quiz-block .q { font-weight: 600; margin: 1.25rem 0 0.5rem; }
+  .quiz-block .options { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+  .quiz-block button.opt { background: #fff; border: 1.5px solid #ccc6b8; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-family: 'Inter', sans-serif; font-size: 0.9rem; transition: all 0.15s; }
+  .quiz-block button.opt:hover { border-color: #a09070; background: #fdf9f0; }
+  .quiz-block button.opt.correct { background: #d4edda; border-color: #6aab73; color: #1b4d22; font-weight: 600; }
+  .quiz-block button.opt.incorrect { background: #f8d7da; border-color: #c97f86; color: #721c24; }
+  .quiz-block .feedback { margin-top: 0.75rem; padding: 0.6rem 0.85rem; border-radius: 6px; font-size: 0.9rem; display: none; }
+  .quiz-block .feedback.show { display: block; }
+  .quiz-block .feedback.correct { background: #d4edda; color: #1b4d22; }
+  .quiz-block .feedback.incorrect { background: #f8d7da; color: #721c24; }
+  .key-insight { background: #eaf0f8; border-left: 4px solid #4a7bb5; padding: 1rem 1.25rem; margin: 1.5rem 0; border-radius: 0 6px 6px 0; }
+  blockquote { border-left: 3px solid #c5bfb0; padding-left: 1rem; margin: 1.25rem 0; color: #555; font-style: italic; }
+  .reminder { background: #f0f4e8; border: 1px solid #c8d6b0; border-radius: 8px; padding: 1rem 1.25rem; margin: 2rem 0; }
+</style>
+</head>
+<body>
+
+<h1>SQL Naming Conventions — Why snake_case?</h1>
+<div style="font-size:0.85rem;color:#888;margin-bottom:2rem;">Lesson 0001 &nbsp;·&nbsp; ~10 minutes</div>
+
+<div class="mission-callout">
+  <strong>🎯 Mission Connection:</strong> Your inherited PostgreSQL database uses specific naming conventions.
+  Understanding <em>why</em> they were chosen lets you write new tables and columns that blend in seamlessly.
+</div>
+
+<h2>The Case-Folding Trap</h2>
+<p>PostgreSQL has a rule that catches newcomers: <strong>unquoted identifiers are folded to lowercase.</strong></p>
+<p>If you write:</p>
+<pre><code>CREATE TABLE UserProfiles (
+    UserID    SERIAL PRIMARY KEY,
+    FirstName TEXT
+);</code></pre>
+<p>PostgreSQL silently converts every name to lowercase — you get a table called <code>userprofiles</code> with columns <code>userid</code> and <code>firstname</code>.</p>
+
+<div class="key-insight">
+  <strong>💡 Key Insight:</strong> PostgreSQL folds unquoted identifiers to lowercase to comply with the SQL standard. This is why <code>snake_case</code> is idiomatic — it reads naturally in lowercase.
+</div>
+
+<h2>Convention Table</h2>
+<table>
+  <thead><tr><th>Database Object</th><th>Convention</th><th>Example</th></tr></thead>
+  <tbody>
+    <tr><td>Table name</td><td><code>snake_case</code>, plural</td><td><code>customer_orders</code></td></tr>
+    <tr><td>Column name</td><td><code>snake_case</code>, singular</td><td><code>created_at</code></td></tr>
+    <tr><td>Primary key</td><td><code>id</code> or <code>{table}_id</code></td><td><code>id</code></td></tr>
+    <tr><td>Foreign key</td><td><code>{referenced_table}_id</code></td><td><code>customer_id</code></td></tr>
+    <tr><td>Boolean column</td><td><code>is_</code> or <code>has_</code> prefix</td><td><code>is_active</code></td></tr>
+    <tr><td>Index</td><td><code>idx_{table}_{column}</code></td><td><code>idx_orders_status</code></td></tr>
+  </tbody>
+</table>
+
+
+<h2>The Quoting Escape Hatch</h2>
+<p>If you <em>must</em> preserve case, use double-quotes:</p>
+<pre><code>CREATE TABLE "UserProfiles" (
+    "UserID" SERIAL PRIMARY KEY
+);
+-- Now you MUST quote it every time:
+SELECT "UserID" FROM "UserProfiles";   -- correct
+SELECT UserID FROM UserProfiles;       -- ERROR: does not exist</code></pre>
+<p>Once you quote once, you must quote forever.</p>
+
+<div class="quiz-block">
+  <h3>Check Your Understanding</h3>
+  <div class="q">Q1: You run CREATE TABLE UserProfiles (UserID INT) without quotes. Actual table name?</div>
+  <div class="options" id="q1-opts">
+    <button class="opt" onclick="checkAnswer('q1', 1)">UserProfiles</button>
+    <button class="opt" onclick="checkAnswer('q1', 2)">userprofiles</button>
+    <button class="opt" onclick="checkAnswer('q1', 3)">user_profiles</button>
+  </div>
+  <div class="feedback" id="q1-fb"></div>
+
+  <div class="q">Q2: Which column name follows PostgreSQL convention for a boolean "is verified"?</div>
+  <div class="options" id="q2-opts">
+    <button class="opt" onclick="checkAnswer('q2', 1)">isVerified</button>
+    <button class="opt" onclick="checkAnswer('q2', 2)">is_verified</button>
+    <button class="opt" onclick="checkAnswer('q2', 3)">verified</button>
+  </div>
+  <div class="feedback" id="q2-fb"></div>
+</div>
+
+<h2>Primary Source</h2>
+<blockquote>
+  Read the official docs: <a href="https://www.postgresql.org/docs/current/sql-syntax-lexical.html#SQL-SYNTAX-IDENTIFIERS">SQL Syntax: Identifiers and Key Words</a>.
+</blockquote>
+
+<div class="reminder">
+  <strong>💬 Questions?</strong> I'm your teacher. If anything is unclear, ask a follow-up question.
+</div>
+
+<script>
+const answers = {
+  q1: { correct: 2, explanations: {
+    1: 'No. Without quotes, PostgreSQL folds identifiers to lowercase.',
+    2: 'Correct! PostgreSQL folds unquoted identifiers to lowercase.',
+    3: 'No. PostgreSQL only lowercases; it does not convert camelCase to snake_case.'
+  }},
+  q2: { correct: 2, explanations: {
+    1: 'No. camelCase requires quoting. Use snake_case with an is_ prefix.',
+    2: 'Correct! Boolean columns use is_ or has_ prefix in snake_case.',
+    3: 'No. "verified" is ambiguous. The is_ prefix makes intent clear.'
+  }}
+};
+function checkAnswer(qid, chosen) {
+  const correct = answers[qid].correct;
+  const isCorrect = chosen === correct;
+  const feedback = document.getElementById(qid + '-fb');
+  const opts = document.getElementById(qid + '-opts');
+  const btns = opts.querySelectorAll('button.opt');
+  btns.forEach(b => { b.classList.remove('correct', 'incorrect'); b.disabled = true; });
+  btns.forEach((b, i) => {
+    if (i + 1 === correct) b.classList.add('correct');
+    if (i + 1 === chosen && !isCorrect) b.classList.add('incorrect');
+  });
+  feedback.textContent = answers[qid].explanations[chosen];
+  feedback.className = 'feedback show ' + (isCorrect ? 'correct' : 'incorrect');
+}
+</script>
+
+</body>
+</html>
