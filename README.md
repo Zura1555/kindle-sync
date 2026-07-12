@@ -12,9 +12,6 @@ Built for [Matt Pocock's skills-for-AI-agents](https://github.com/mattpocock/ski
   <img src="public/assets/demo.png" alt="Browser lesson on the left, Kindle PDF on the right" width="100%">
 </p>
 
-<p align="center">
-  <img src="public/assets/syncing-flow.png" alt="flow: /teach → lessons → /kindle-sync → Kindle" width="100%">
-</p>
 
 ---
 
