@@ -14,12 +14,9 @@ Built for [Matt Pocock's skills-for-AI-agents](https://github.com/mattpocock/ski
   <img src="" alt="demo" width="100%">
 </p>
 
-```
-   /teach                           /kindle-sync
-   AI generates                  Compile PDF
-   HTML lessons      ──→         Send via Gmail      ──→    📖 Kindle
-   + references                  ~5 min delivery
-```
+<p align="center">
+  <img src="syncing-flow.png" alt="flow: /teach → lessons → /kindle-sync → Kindle" width="100%">
+</p>
 
 ---
 
@@ -76,10 +73,6 @@ python3 lessons/sync_to_kindle.py   # → appears on Kindle in ~5 min
 ---
 
 ## How It Works
-
-```
-build script  →  Gmail (app password)  →  Kindle email (Amazon)  →  your device
-```
 
 The build script compiles all `lessons/0*.html` and `reference/*.html` into a single PDF with Kindle-optimized CSS (page breaks, readable fonts, stripped JavaScript). Amazon receives the email and pushes the PDF to your Kindle over Wi-Fi.
 
