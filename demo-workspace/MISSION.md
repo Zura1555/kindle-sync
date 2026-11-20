@@ -1,4 +1,4 @@
-# Mission
+# Mission: PostgreSQL
 
 ## The Goal
 To understand, maintain, and improve an inherited PostgreSQL database.

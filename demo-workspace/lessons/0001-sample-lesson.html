@@ -86,20 +86,20 @@ SELECT UserID FROM UserProfiles;       -- ERROR: does not exist</code></pre>
 <div class="quiz-block">
   <h3>Check Your Understanding</h3>
   <div class="q">Q1: You run CREATE TABLE UserProfiles (UserID INT) without quotes. Actual table name?</div>
-  <div class="options" id="q1-opts">
-    <button class="opt" onclick="checkAnswer('q1', 1)">UserProfiles</button>
-    <button class="opt" onclick="checkAnswer('q1', 2)">userprofiles</button>
-    <button class="opt" onclick="checkAnswer('q1', 3)">user_profiles</button>
+  <div class="options">
+    <button class="opt" data-explain="No. Without quotes, PostgreSQL folds identifiers to lowercase.">UserProfiles</button>
+    <button class="opt" data-correct data-explain="Correct! PostgreSQL folds unquoted identifiers to lowercase.">userprofiles</button>
+    <button class="opt" data-explain="No. PostgreSQL only lowercases; it does not convert camelCase to snake_case.">user_profiles</button>
   </div>
-  <div class="feedback" id="q1-fb"></div>
+  <div class="feedback"></div>
 
   <div class="q">Q2: Which column name follows PostgreSQL convention for a boolean "is verified"?</div>
-  <div class="options" id="q2-opts">
-    <button class="opt" onclick="checkAnswer('q2', 1)">isVerified</button>
-    <button class="opt" onclick="checkAnswer('q2', 2)">is_verified</button>
-    <button class="opt" onclick="checkAnswer('q2', 3)">verified</button>
+  <div class="options">
+    <button class="opt" data-explain="No. camelCase requires quoting. Use snake_case with an is_ prefix.">isVerified</button>
+    <button class="opt" data-correct data-explain="Correct! Boolean columns use an is_ or has_ prefix in snake_case.">is_verified</button>
+    <button class="opt" data-explain="No. &quot;verified&quot; is ambiguous. The is_ prefix makes intent clear.">verified</button>
   </div>
-  <div class="feedback" id="q2-fb"></div>
+  <div class="feedback"></div>
 </div>
 
 <h2>Primary Source</h2>
@@ -112,32 +112,17 @@ SELECT UserID FROM UserProfiles;       -- ERROR: does not exist</code></pre>
 </div>
 
 <script>
-const answers = {
-  q1: { correct: 2, explanations: {
-    1: 'No. Without quotes, PostgreSQL folds identifiers to lowercase.',
-    2: 'Correct! PostgreSQL folds unquoted identifiers to lowercase.',
-    3: 'No. PostgreSQL only lowercases; it does not convert camelCase to snake_case.'
-  }},
-  q2: { correct: 2, explanations: {
-    1: 'No. camelCase requires quoting. Use snake_case with an is_ prefix.',
-    2: 'Correct! Boolean columns use is_ or has_ prefix in snake_case.',
-    3: 'No. "verified" is ambiguous. The is_ prefix makes intent clear.'
-  }}
-};
-function checkAnswer(qid, chosen) {
-  const correct = answers[qid].correct;
-  const isCorrect = chosen === correct;
-  const feedback = document.getElementById(qid + '-fb');
-  const opts = document.getElementById(qid + '-opts');
-  const btns = opts.querySelectorAll('button.opt');
-  btns.forEach(b => { b.classList.remove('correct', 'incorrect'); b.disabled = true; });
-  btns.forEach((b, i) => {
-    if (i + 1 === correct) b.classList.add('correct');
-    if (i + 1 === chosen && !isCorrect) b.classList.add('incorrect');
-  });
-  feedback.textContent = answers[qid].explanations[chosen];
-  feedback.className = 'feedback show ' + (isCorrect ? 'correct' : 'incorrect');
-}
+document.querySelectorAll('.quiz-block .options').forEach(opts => {
+  const btns = [...opts.querySelectorAll('button.opt')];
+  const fb = opts.nextElementSibling;
+  btns.forEach(b => b.addEventListener('click', () => {
+    const ok = b.hasAttribute('data-correct');
+    btns.forEach(x => { x.disabled = true; if (x.hasAttribute('data-correct')) x.classList.add('correct'); });
+    if (!ok) b.classList.add('incorrect');
+    fb.textContent = b.dataset.explain || (ok ? 'Correct!' : 'Not quite.');
+    fb.className = 'feedback show ' + (ok ? 'correct' : 'incorrect');
+  }));
+});
 </script>
 
 </body>

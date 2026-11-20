@@ -19,36 +19,33 @@ Built for [Matt Pocock's skills-for-AI-agents](https://github.com/mattpocock/ski
 
 | | |
 |---|---|
-| `skills/teach.md` | Agent skill — generates interactive lessons |
-| `skills/kindle-sync.md` | Agent skill — syncs lessons to Kindle |
-| `workspace-template/` | Scaffolding — copy to start learning anything |
-| `demo-workspace/` | Working example — PostgreSQL lesson, ready to sync |
-| `sync_to_kindle.py` | Build PDF + send |
-| `build_kindle.py` | Compile lessons → Kindle-optimized PDF |
-| `send_to_kindle.py` | Deliver via Gmail SMTP |
+| `skills/teach/SKILL.md` | Agent skill: generates interactive lessons |
+| `skills/kindle-sync/SKILL.md` | Agent skill: syncs lessons to Kindle |
+| `kindle_sync.py` | The `kindle-sync` CLI: builds the book (PDF or EPUB) and emails it |
+| `workspace-template/` | Scaffolding: copy it to start learning anything |
+| `demo-workspace/` | Working example: a PostgreSQL lesson, ready to sync |
 
 ---
 
 ## Quick Start
 
 ```bash
-# 1. Scaffold a workspace
+# 1. Install the CLI
+uv tool install git+https://github.com/zura1555/kindle-sync   # or: pipx install git+https://github.com/zura1555/kindle-sync
+# PDF output needs Pango (EPUB does not):
+#   Ubuntu: sudo apt install libpango-1.0-0 libpangoft2-1.0-0
+#   macOS:  brew install pango
+
+# 2. Install the skills into your agent's skills directory
+cp -r skills/teach skills/kindle-sync ~/.claude/skills/        # Claude Code
+cp -r skills/teach skills/kindle-sync ~/.config/agents/skills/ # Amp
+
+# 3. Scaffold a workspace
 cp -r workspace-template ~/my-learning && cd ~/my-learning
 
-# 2. Copy sync scripts
-cp ../sync_to_kindle.py lessons/
-cp ../build_kindle.py lessons/
-mkdir -p lessons/kindle-output
-cp ../send_to_kindle.py lessons/kindle-output/
-
-# 3. Install
-pip install weasyprint
-# Ubuntu: sudo apt install libpango-1.0-0 libcairo2
-# macOS:  brew install pango
-
-# 4. Configure Kindle
-cp ../.kindle-creds.example .kindle-creds && chmod 600 .kindle-creds
-# Fill in: KINDLE_EMAIL, GMAIL_ADDRESS, GMAIL_APP_PASSWORD
+# 4. Configure Kindle delivery (here, or once in ~/.kindle-creds for every workspace)
+cp /path/to/kindle-sync/.kindle-creds.example .kindle-creds && chmod 600 .kindle-creds
+# Fill in: KINDLE_EMAIL, SENDER_EMAIL, SMTP_PASSWORD
 ```
 
 You need three things:
@@ -56,32 +53,50 @@ You need three things:
 | Credential | Where to get it |
 |---|---|
 | **Kindle email** | [amazon.com/myk](https://amazon.com/myk) → Devices → Kindle → Send-to-Kindle Email |
-| **App password** | [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords) (2FA required) |
-| **Approved sender** | Add your Gmail in Amazon's Kindle settings |
+| **App password** | [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords) (2FA required). Other providers: set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER` |
+| **Approved sender** | Add your sender address in Amazon's Personal Document Settings |
+
+Credentials can also come from environment variables with the same names.
 
 ```bash
 # 5. Learn and sync
-/teach me PostgreSQL         # Agent generates lessons
-python3 lessons/sync_to_kindle.py   # → appears on Kindle in ~5 min
+/teach me PostgreSQL     # Agent generates lessons
+kindle-sync sync         # → appears on your Kindle in ~5 min
 ```
 
 ---
 
 ## How It Works
 
-The build script compiles all `lessons/0*.html` and `reference/*.html` into a single PDF with Kindle-optimized CSS (page breaks, readable fonts, stripped JavaScript). Amazon receives the email and pushes the PDF to your Kindle over Wi-Fi.
+`kindle-sync` compiles all `lessons/[0-9]*.html` and `reference/*.html` into one book in `lessons/kindle-output/`, then emails it to your Kindle.
 
-Lessons follow a structured pedagogy: knowledge first, interactive quiz with immediate feedback, primary source citation, and a reminder to ask the agent follow-up questions.
+| Command | |
+|---|---|
+| `kindle-sync build` | Build the book only |
+| `kindle-sync send` | Email the built book |
+| `kindle-sync sync` | Build, then send if any lesson changed since the last send (`--force` sends anyway) |
+
+- **Formats:** the default is a 4.5×6in PDF with a clickable contents page. `--format epub` makes a reflowable EPUB, so font size, dictionary, and highlights work on the Kindle.
+- **Title:** taken from `# Mission: <Topic>` in `MISSION.md`. Override it with `--title`.
+- **Quizzes:** scripts are stripped, quiz options become a lettered list, and the answers move to an answer key at the end of each chapter, so you can still practise retrieval offline.
+
+Lessons follow a structured pedagogy: knowledge first, an interactive quiz with immediate feedback, a primary source citation, and a reminder to ask the agent follow-up questions.
 
 ---
 
 ## Try the Demo
 
 ```bash
-cd demo-workspace
-ln -s ../.kindle-creds .kindle-creds
-python3 lessons/build_kindle.py
-# → lessons/kindle-output/demo-workspace.pdf
+kindle-sync build --workspace demo-workspace
+# → demo-workspace/lessons/kindle-output/postgresql.pdf
+```
+
+---
+
+## Development
+
+```bash
+pip install -e ".[test]" && pytest
 ```
 
 ---

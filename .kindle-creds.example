@@ -1,11 +1,17 @@
-# Kindle Sync credentials
-# Copy this to .kindle-creds and fill in your details.
-# Then: chmod 600 .kindle-creds
+# kindle-sync credentials
+# Copy to .kindle-creds in your workspace (or ~/.kindle-creds for all workspaces),
+# fill it in, then: chmod 600 .kindle-creds
+# Environment variables with the same names override this file.
 #
-# KINDLE_EMAIL: Find at amazon.com/myk → Devices → Kindle → Send-to-Kindle Email
-# GMAIL_ADDRESS: Your Gmail (add as approved sender in Amazon's Kindle settings)
-# GMAIL_APP_PASSWORD: Generate at myaccount.google.com/apppasswords (requires 2FA)
+# KINDLE_EMAIL:  amazon.com/myk → Devices → your Kindle → Send-to-Kindle Email
+# SENDER_EMAIL:  the address you send from; approve it in Amazon's Personal Document Settings
+# SMTP_PASSWORD: for Gmail, an app password from myaccount.google.com/apppasswords (requires 2FA)
 
 KINDLE_EMAIL=yourname@kindle.com
-GMAIL_ADDRESS=yourname@gmail.com
-GMAIL_APP_PASSWORD=your-16-char-app-password
+SENDER_EMAIL=yourname@gmail.com
+SMTP_PASSWORD=your-16-char-app-password
+
+# Optional, for providers other than Gmail (port 465 uses SSL, others use STARTTLS):
+# SMTP_HOST=smtp.gmail.com
+# SMTP_PORT=587
+# SMTP_USER=yourname@gmail.com   # defaults to SENDER_EMAIL

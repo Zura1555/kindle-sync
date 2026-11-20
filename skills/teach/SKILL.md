@@ -1,3 +1,8 @@
+---
+name: teach
+description: Teaches any topic by building a learning workspace of short, interactive HTML lessons, reference docs, and learning records tied to the learner's mission. Use when the user asks to learn, study, or be taught a topic, or invokes /teach.
+---
+
 # Teach
 
 ## Description
@@ -11,7 +16,7 @@ When activated, follow this teaching methodology:
 
 ### Workspace Structure
 A teaching workspace lives at a directory with these files:
-- `MISSION.md` — The reason the user wants to learn. Grounds all teaching.
+- `MISSION.md` — The reason the user wants to learn. Grounds all teaching. Its first line is `# Mission: <Topic>`; kindle-sync uses `<Topic>` as the book title.
 - `RESOURCES.md` — High-trust resources for acquiring knowledge.
 - `NOTES.md` — User preferences and teaching notes (scratchpad).
 - `./lessons/*.html` — Self-contained HTML lessons. Titled `0001-<dash-case-name>.html`.
@@ -37,6 +42,32 @@ A teaching workspace lives at a directory with these files:
 ### Quiz Design
 - Use in-browser quizzes with immediate feedback.
 - Answers should be similar in length to avoid giving clues through formatting.
+- Put the answers in the markup, not only in JavaScript: kindle-sync strips scripts, prints the options as a lettered list, and moves the answers to an answer key at the end of the chapter. Mark the correct button with `data-correct` and give every button a `data-explain` with its feedback:
+
+```html
+<div class="quiz-block">
+  <h3>Check Your Understanding</h3>
+  <div class="q">Q1: Question text?</div>
+  <div class="options">
+    <button class="opt" data-explain="No. Why this is wrong.">Option one</button>
+    <button class="opt" data-correct data-explain="Correct! Why this is right.">Option two</button>
+  </div>
+  <div class="feedback"></div>
+</div>
+<script>
+document.querySelectorAll('.quiz-block .options').forEach(opts => {
+  const btns = [...opts.querySelectorAll('button.opt')];
+  const fb = opts.nextElementSibling;
+  btns.forEach(b => b.addEventListener('click', () => {
+    const ok = b.hasAttribute('data-correct');
+    btns.forEach(x => { x.disabled = true; if (x.hasAttribute('data-correct')) x.classList.add('correct'); });
+    if (!ok) b.classList.add('incorrect');
+    fb.textContent = b.dataset.explain || (ok ? 'Correct!' : 'Not quite.');
+    fb.className = 'feedback show ' + (ok ? 'correct' : 'incorrect');
+  }));
+});
+</script>
+```
 
 ### Reference Documents
 - Create reference docs alongside lessons: glossaries, syntax cheats, flowcharts.

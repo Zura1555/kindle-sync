@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kindle-sync"
+version = "0.2.0"
+description = "Compile /teach lessons into a Kindle book (PDF or EPUB) and email it to your Kindle."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+dependencies = ["weasyprint>=60.0", "beautifulsoup4>=4.12"]
+
+[project.optional-dependencies]
+test = ["pytest", "pypdf"]
+
+[project.scripts]
+kindle-sync = "kindle_sync:main"
+
+[tool.setuptools]
+py-modules = ["kindle_sync"]

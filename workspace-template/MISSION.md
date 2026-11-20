@@ -1,4 +1,4 @@
-# Mission
+# Mission: [Topic]
 
 ## The Goal
 [Describe what you want to learn and why it matters to you.]
