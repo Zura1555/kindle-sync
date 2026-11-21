@@ -2,24 +2,36 @@
 """
 kindle-sync: compile a /teach learning workspace into a Kindle book and email it to your Kindle.
 
-    kindle-sync build   # lessons/*.html + reference/*.html -> lessons/kindle-output/<title>.pdf
+    kindle-sync setup   # one-time: Kindle address, sender, app password (hidden), format
+    kindle-sync build   # lessons/*.html + reference/*.html -> lessons/kindle-output/<title>.epub
     kindle-sync send    # email the built book to your Kindle
-    kindle-sync sync    # build, then send if anything changed since the last send
+    kindle-sync sync    # build, then send if anything changed since the last submission to this Kindle
+    kindle-sync sync --dry-run  # show what sync would do, without building, sending, or recording anything
+    kindle-sync doctor  # check settings and dependencies
+    kindle-sync status  # show settings, setup progress, and recent submissions
+    kindle-sync test    # send a small test document
+    kindle-sync resolve sent|not-sent  # settle a submission whose outcome is unknown
+    kindle-sync reset   # delete saved settings and the app password (asks first)
 
-Run from the workspace root, or pass --workspace. Add --format epub for a reflowable book.
+Run from the workspace root, or pass --workspace. Books are EPUB unless you choose PDF.
 """
 from __future__ import annotations
 
 import argparse
+import getpass
 import hashlib
 import html
+import json
 import os
 import re
 import smtplib
 import ssl
 import sys
+import tempfile
+import time
 import uuid
 import zipfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.message import EmailMessage
@@ -27,7 +39,14 @@ from pathlib import Path
 
 from bs4 import BeautifulSoup
 
-__version__ = "0.2.0"
+try:
+    import fcntl
+    msvcrt = None
+except ImportError:  # Windows
+    import msvcrt
+    fcntl = None
+
+__version__ = "0.3.0"
 
 # Shared by PDF and EPUB. Sizes are relative so EPUB readers can scale the text.
 BASE_CSS = """
@@ -228,11 +247,22 @@ def link_chapters(book, href):
                 a["href"] = href(by_name[name])
 
 
+# Identifies how books are rendered. Bump it when a change alters the built book, so unchanged lessons are sent
+# again with the fix. Releases that don't change the book leave it alone, so upgrading doesn't resend anything.
+RENDER_VERSION = 1
+
+
 def source_digest(book, fmt):
-    h = hashlib.sha256(f"{__version__}\0{book.title}\0{fmt}".encode())
+    h = hashlib.sha256(f"render-{RENDER_VERSION}\0{book.title}\0{fmt}".encode())
     for ch in book.chapters:
         h.update(ch.path.name.encode() + b"\0" + ch.path.read_bytes())
     return h.hexdigest()
+
+
+def chapter_hashes(book):
+    """Each source file's hash by its path in the workspace, to list which lessons changed."""
+    return {ch.path.relative_to(book.workspace).as_posix(): hashlib.sha256(ch.path.read_bytes()).hexdigest()
+            for ch in book.chapters}
 
 
 def render_pdf(book, out):
@@ -334,116 +364,945 @@ def build(book, fmt):
     return out
 
 
-CRED_KEYS = {
-    "KINDLE_EMAIL": ("KINDLE_EMAIL",),
-    "SENDER_EMAIL": ("SENDER_EMAIL", "GMAIL_ADDRESS"),
-    "SMTP_PASSWORD": ("SMTP_PASSWORD", "GMAIL_APP_PASSWORD"),
-    "SMTP_USER": ("SMTP_USER",),
-    "SMTP_HOST": ("SMTP_HOST",),
-    "SMTP_PORT": ("SMTP_PORT",),
+# ---------------------------------------------------------------------------
+# Configuration: environment, then <workspace>/.kindle-creds, then the user config (and the system keyring
+# for the password), then the legacy ~/.kindle-creds. Each key comes from the first place that sets it.
+
+FORMATS = ("epub", "pdf")
+CONFIG_KEYS = ("KINDLE_EMAIL", "SENDER_EMAIL", "SMTP_PASSWORD", "SMTP_USER", "SMTP_HOST", "SMTP_PORT", "FORMAT")
+ALIASES = {"SENDER_EMAIL": ("GMAIL_ADDRESS",), "SMTP_PASSWORD": ("GMAIL_APP_PASSWORD",)}
+KEYRING_SERVICE = "kindle-sync"
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+KINDLE_DOMAINS = ("@kindle.com", "@free.kindle.com", "@kindle.cn")
+SMTP_PRESETS = {
+    "gmail.com": ("smtp.gmail.com", "587"),
+    "googlemail.com": ("smtp.gmail.com", "587"),
+    "icloud.com": ("smtp.mail.me.com", "587"),
+    "me.com": ("smtp.mail.me.com", "587"),
+    "yahoo.com": ("smtp.mail.yahoo.com", "465"),
+    "fastmail.com": ("smtp.fastmail.com", "465"),
+}
+HINTS = {
+    "KINDLE_EMAIL": "your Send-to-Kindle address (amazon.com/myk → Devices → your Kindle)",
+    "SENDER_EMAIL": "the address you send from, approved in Amazon's Personal Document Settings",
+    "SMTP_PASSWORD": "an app password from your mail provider (Gmail: myaccount.google.com/apppasswords)",
 }
 
 
-def load_creds(workspace):
-    """Environment variables, then <workspace>/.kindle-creds, then ~/.kindle-creds."""
-    found, source = {}, f"{workspace / '.kindle-creds'} or ~/.kindle-creds"
-    for path in (workspace / ".kindle-creds", Path.home() / ".kindle-creds"):
+def user_config_dir():
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "kindle-sync"
+
+
+def config_files(workspace):
+    """Credential files, highest precedence first."""
+    paths = [workspace / ".kindle-creds", user_config_dir() / "config", Path.home() / ".kindle-creds"]
+    return [p for i, p in enumerate(paths) if p not in paths[:i]]
+
+
+def read_kv(path):
+    found = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            found[k.strip()] = v.strip().strip("'\"")
+    return found
+
+
+def too_open(path):
+    return os.name == "posix" and path.stat().st_mode & 0o077
+
+
+def keyring_backend():
+    """The OS credential store (macOS Keychain, Windows Credential Locker, Secret Service), or None."""
+    try:
+        import keyring
+
+        backend = keyring.get_keyring()
+        return backend if backend.priority > 0 else None
+    except Exception:
+        return None
+
+
+@dataclass
+class Config:
+    values: dict
+    sources: dict  # key -> where its value came from
+    warnings: list
+
+    def __getitem__(self, key):
+        return self.values.get(key, "")
+
+    @property
+    def host(self):
+        return self["SMTP_HOST"] or "smtp.gmail.com"
+
+    @property
+    def port(self):
+        return int(self["SMTP_PORT"] or 587)
+
+    @property
+    def user(self):
+        return self["SMTP_USER"] or self["SENDER_EMAIL"]
+
+
+def pick(raw):
+    out = {}
+    for key in CONFIG_KEYS:
+        name = next((n for n in (key,) + ALIASES.get(key, ()) if raw.get(n)), None)
+        if name:
+            out[key] = raw[name]
+    return out
+
+
+def load_config(workspace, to=None, secrets=True):
+    layers, warnings = [("environment variable", pick(os.environ))], []
+    for path in config_files(workspace):
         if path.is_file():
-            source = str(path)
-            for line in path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    found[k.strip()] = v.strip().strip("'\"")
-            break
-    creds = {}
-    for key, names in CRED_KEYS.items():
-        creds[key] = next((os.environ.get(n) or found.get(n) for n in names if os.environ.get(n) or found.get(n)), "")
-    return creds, source
+            values = pick(read_kv(path))
+            if values.get("SMTP_PASSWORD") and too_open(path):
+                del values["SMTP_PASSWORD"]
+                warnings.append(f"Ignored SMTP_PASSWORD in {path} because other users can read it. Run: chmod 600 {path}")
+            layers.append((str(path), values))
+    values, sources = {}, {}
+    for label, layer in layers:
+        for key, value in layer.items():
+            if key not in values:
+                values[key], sources[key] = value, label
+    if to:
+        values["KINDLE_EMAIL"], sources["KINDLE_EMAIL"] = to, "--to"
+    cfg = Config(values, sources, warnings)
+    if secrets and sources.get("SMTP_PASSWORD") in (None, str(Path.home() / ".kindle-creds")) and cfg.user:
+        backend = keyring_backend()
+        try:
+            secret = backend.get_password(KEYRING_SERVICE, cfg.user) if backend else None
+        except Exception:
+            secret = None
+        if secret:
+            values["SMTP_PASSWORD"], sources["SMTP_PASSWORD"] = secret, "system keyring"
+    return cfg
 
 
-def send(book_path, workspace, title):
-    creds, source = load_creds(workspace)
-    missing = [k for k in ("KINDLE_EMAIL", "SENDER_EMAIL", "SMTP_PASSWORD") if not creds[k]]
-    if missing:
-        fail(
-            f"Missing credentials: {', '.join(missing)} (looked in env vars and {source}).\n"
-            "   KINDLE_EMAIL:  amazon.com/myk → Devices → your Kindle → Send-to-Kindle Email\n"
-            "   SENDER_EMAIL:  an address approved in Amazon's Personal Document Settings\n"
-            "   SMTP_PASSWORD: for Gmail, an app password from myaccount.google.com/apppasswords"
-        )
-    host = creds["SMTP_HOST"] or "smtp.gmail.com"
-    port = int(creds["SMTP_PORT"] or 587)
-    subtype = "pdf" if book_path.suffix == ".pdf" else "epub+zip"
+def email_error(value):
+    return None if EMAIL_RE.match(value or "") else "Enter an email address like name@example.com."
 
-    msg = EmailMessage()
-    msg["From"] = creds["SENDER_EMAIL"]
-    msg["To"] = creds["KINDLE_EMAIL"]
-    msg["Subject"] = title
-    msg.set_content(f"{title}, sent by kindle-sync.")
-    msg.add_attachment(book_path.read_bytes(), maintype="application", subtype=subtype, filename=book_path.name)
 
-    print(f"📧 Sending {book_path.name} ({book_path.stat().st_size / 1024:.0f} KB) to {creds['KINDLE_EMAIL']} via {host}...")
+def port_error(value):
+    return None if value.isdigit() and 0 < int(value) < 65536 else "Enter a port number from 1 to 65535 (usually 587 or 465)."
+
+
+def config_problems(cfg):
+    problems = [f"{key} is not set: {HINTS[key]}" for key in HINTS if not cfg[key]]
+    for key in ("KINDLE_EMAIL", "SENDER_EMAIL"):
+        if cfg[key] and email_error(cfg[key]):
+            problems.append(f"{key} is not a valid email address: {cfg[key]!r} (from {cfg.sources[key]})")
+    if cfg["SMTP_PORT"] and port_error(cfg["SMTP_PORT"]):
+        problems.append(f"SMTP_PORT must be a number from 1 to 65535, not {cfg['SMTP_PORT']!r} (from {cfg.sources['SMTP_PORT']})")
+    if cfg["FORMAT"] and cfg["FORMAT"].lower() not in FORMATS:
+        problems.append(f"FORMAT must be epub or pdf, not {cfg['FORMAT']!r} (from {cfg.sources['FORMAT']})")
+    return problems
+
+
+def require_send_config(cfg):
+    problems = config_problems(cfg)
+    if problems:
+        fail("Kindle delivery is not set up:\n" + "".join(f"   - {p}\n" for p in problems + cfg.warnings)
+             + "   Run `kindle-sync setup` to configure it, or `kindle-sync doctor` for details.")
+
+
+def format_choice(choice, cfg, workspace):
+    """(format, reason). New users get EPUB; an explicit or saved choice, or earlier PDF syncs, keep PDF."""
+    if choice:
+        return choice, "--format"
+    if cfg["FORMAT"].lower() in FORMATS:
+        return cfg["FORMAT"].lower(), f"FORMAT in {cfg.sources['FORMAT']}"
+    if (workspace / "lessons" / "kindle-output" / ".last-sent-pdf").is_file():
+        return "pdf", "earlier PDF syncs in this workspace"
+    return "epub", "default"
+
+
+def resolve_format(choice, cfg, workspace):
+    fmt, reason = format_choice(choice, cfg, workspace)
+    if reason.startswith("earlier"):
+        print("ℹ️  Using PDF, as in this workspace's earlier syncs. New setups default to EPUB. "
+              "Set FORMAT=pdf or FORMAT=epub with `kindle-sync setup` to choose and hide this note.")
+    return fmt
+
+
+# ---------------------------------------------------------------------------
+# Submission state: lessons/kindle-output/.kindle-sync-state.json, shared by build, send, sync, and resolve.
+#   builds:      book file -> digest and lesson hashes of its last build
+#   submissions: destination|sender|SMTP host|SMTP user|book file -> the last submission the provider accepted
+#   unknown:     same keys -> a submission whose connection broke, so it may or may not have gone out
+#   history:     the last HISTORY_LIMIT attempts
+
+STATE_FILE = ".kindle-sync-state.json"
+HISTORY_LIMIT = 20
+RESEND_NOTE = ("ℹ️  This sends a new copy of the whole book. Your Kindle may keep it as a separate document next to "
+               "the earlier copy, and highlights, notes, and reading position from the earlier copy may not carry over.")
+
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def local_time(iso):
+    return datetime.fromisoformat(iso).astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def write_atomic(path, text, mode=0o644):
+    """Write a sibling temp file, then rename it over path, so readers never see a partial file."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def read_json(path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except ValueError:
+        print(f"⚠️  {path} is unreadable; starting a fresh history.")
+        return {}
+
+
+def write_json(path, data):
+    write_atomic(path, json.dumps(data, indent=2) + "\n")
+
+
+@contextmanager
+def locked_state(out_dir):
+    """Hold the workspace lock, so concurrent syncs, in any process, can't both submit the same book."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fd = os.open(out_dir / ".kindle-sync.lock", os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        if msvcrt:
+            while True:  # LK_LOCK gives up after 10 seconds, and a submission can take longer
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.2)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield read_json(out_dir / STATE_FILE)
+    finally:
+        if msvcrt:
+            try:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+        os.close(fd)
+
+
+def submission_key(cfg, filename):
+    """One entry per destination, sending account, and book file (which carries the format)."""
+    return "|".join(s.lower() for s in (cfg["KINDLE_EMAIL"], cfg["SENDER_EMAIL"], cfg.host, cfg.user, filename))
+
+
+def add_history(state, record, **changes):
+    entry = {k: v for k, v in record.items() if k != "chapters"}
+    entry.update(changes)
+    state["history"] = (state.get("history", []) + [entry])[-HISTORY_LIMIT:]
+
+
+# ---------------------------------------------------------------------------
+# Onboarding progress, per user: ~/.config/kindle-sync/onboarding.json
+#   logins: SMTP host|user -> the last login attempt
+#   tests:  Kindle address -> the sender of the last test document, when it was submitted, and when you confirmed it
+
+
+def onboarding_path():
+    return user_config_dir() / "onboarding.json"
+
+
+def login_key(cfg):
+    return f"{cfg.host}|{cfg.user}".lower()
+
+
+def update_onboarding(change):
+    """Best effort: a read-only home directory must not stop a submission."""
+    try:
+        data = read_json(onboarding_path())
+        change(data)
+        write_json(onboarding_path(), data)
+    except OSError:
+        pass
+
+
+def record_login(cfg, error=None):
+    def change(data):
+        data.setdefault("logins", {})[login_key(cfg)] = {"at": now_iso(), **({"error": error} if error else {})}
+    update_onboarding(change)
+
+
+def kindle_test(cfg):
+    """The test-document record for this Kindle, if the test came from the current sender."""
+    entry = read_json(onboarding_path()).get("tests", {}).get(cfg["KINDLE_EMAIL"].lower(), {})
+    return entry if entry.get("sender", "").lower() == cfg["SENDER_EMAIL"].lower() else {}
+
+
+def record_test(cfg, confirmed):
+    def change(data):
+        tests = data.setdefault("tests", {})
+        key = cfg["KINDLE_EMAIL"].lower()
+        entry = tests.get(key, {})
+        if entry.get("sender", "").lower() != cfg["SENDER_EMAIL"].lower():
+            entry = {}
+        entry["sender"] = cfg["SENDER_EMAIL"]
+        if confirmed:
+            entry["confirmed_at"] = now_iso()
+        else:
+            entry["submitted_at"] = now_iso()
+            entry.pop("confirmed_at", None)
+        tests[key] = entry
+    update_onboarding(change)
+
+
+def onboarding_steps(cfg):
+    problems = config_problems(cfg)
+    login = read_json(onboarding_path()).get("logins", {}).get(login_key(cfg), {})
+    test = kindle_test(cfg)
+    steps = [("✅", "Settings are complete") if not problems else
+             ("❌", f"Settings are incomplete: {problems[0]}. Run `kindle-sync setup`.")]
+    if login.get("error"):
+        steps.append(("❌", f"The last mail login ({local_time(login['at'])}) failed: {login['error']}"))
+    elif login:
+        steps.append(("✅", f"Mail login worked ({local_time(login['at'])})"))
+    else:
+        steps.append(("⬜", "Mail login not checked yet. Run `kindle-sync doctor --check-login` (sends nothing)."))
+    if test.get("submitted_at"):
+        steps.append(("✅", f"Test document submitted ({local_time(test['submitted_at'])})"))
+    else:
+        steps.append(("⬜", "No test document yet. Run `kindle-sync test` to send one."))
+    if test.get("confirmed_at"):
+        steps.append(("✅", f"You confirmed the test arrived ({local_time(test['confirmed_at'])})"))
+    elif test.get("submitted_at"):
+        steps.append(("⬜", "Arrival not confirmed. Once the test is on your Kindle, run `kindle-sync test --confirm`; "
+                           "if it doesn't arrive, run `kindle-sync test --troubleshoot`."))
+    else:
+        steps.append(("⬜", "Arrival not confirmed"))
+    return steps
+
+
+def troubleshooting(cfg):
+    sender = cfg["SENDER_EMAIL"] or "your sender address"
+    dest = cfg["KINDLE_EMAIL"] or "your Send-to-Kindle address"
+    return ("If the document hasn't reached your Kindle after 10 minutes, check these in order:\n"
+            f"  1. Sent mail: the email to {dest} is in {sender}'s Sent folder. If it isn't, your provider didn't\n"
+            "     send it; run `kindle-sync doctor --check-login`.\n"
+            f"  2. Replies from Amazon: look in {sender}'s inbox and spam for an Amazon email asking you to verify\n"
+            "     the request, or saying the document couldn't be delivered. Follow its instructions.\n"
+            "  3. Approved sender: amazon.com/myk → Preferences → Personal Document Settings → Approved Personal\n"
+            f"     Document E-mail List includes {sender}.\n"
+            f"  4. Destination: {dest} is the Send-to-Kindle address shown for this device under\n"
+            "     amazon.com/myk → Devices.\n"
+            "  5. Your library: if the document is listed under amazon.com/myk → Content → Docs, Amazon has it and\n"
+            "     the device hasn't downloaded it yet.\n"
+            "  6. The Kindle: connect it to Wi-Fi and choose Sync from its menu or settings.\n"
+            "Run `kindle-sync test --confirm` once it arrives, or `kindle-sync test` to send another.")
+
+
+# ---------------------------------------------------------------------------
+# Email submission. Success means the mail provider accepted the message, not that it reached the Kindle.
+
+class SubmitError(Exception):
+    def __init__(self, result, message):
+        super().__init__(message)
+        self.result, self.message = result, message  # result: "failed" or "unknown"
+
+
+def smtp_login(cfg):
+    host, port = cfg.host, cfg.port
     context = ssl.create_default_context()
+    server = None
     try:
         if port == 465:
             server = smtplib.SMTP_SSL(host, port, timeout=60, context=context)
         else:
             server = smtplib.SMTP(host, port, timeout=60)
-        with server:
-            if port != 465:
-                server.starttls(context=context)
-            server.login(creds["SMTP_USER"] or creds["SENDER_EMAIL"], creds["SMTP_PASSWORD"])
-            server.send_message(msg)
+            server.starttls(context=context)
+        server.login(cfg.user, cfg["SMTP_PASSWORD"])
+        record_login(cfg)
+        return server
     except smtplib.SMTPAuthenticationError:
-        fail(f"{host} rejected the login. Check SENDER_EMAIL/SMTP_USER and SMTP_PASSWORD "
-             "(Gmail needs 2FA and an app password).")
+        message = (f"Authentication rejected: {host} refused the login for {cfg.user}. Check SENDER_EMAIL/SMTP_USER "
+                   "and SMTP_PASSWORD (Gmail needs 2-Step Verification and an app password), or run `kindle-sync setup`.")
+    except smtplib.SMTPNotSupportedError:
+        message = f"{host}:{port} does not offer STARTTLS. Most providers use port 587 (STARTTLS) or 465 (SSL)."
     except (smtplib.SMTPException, OSError) as e:
-        fail(f"Sending failed: {e}")
-    print("✅ Sent! It appears on your Kindle within a few minutes (over Wi-Fi).")
+        stage = "log in to" if server else "connect to"
+        message = (f"Network problem: could not {stage} {host}:{port} ({e}). "
+                   "Check your internet connection and SMTP_HOST/SMTP_PORT.")
+    if server:
+        server.close()
+    record_login(cfg, message)
+    raise SubmitError("failed", message)
+
+
+def deliver(cfg, attachment, subject):
+    host, to = cfg.host, cfg["KINDLE_EMAIL"]
+    msg = EmailMessage()
+    msg["From"] = cfg["SENDER_EMAIL"]
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.set_content(f"{subject}, sent by kindle-sync.")
+    subtype = "pdf" if attachment.suffix.lower() == ".pdf" else "epub+zip"
+    msg.add_attachment(attachment.read_bytes(), maintype="application", subtype=subtype, filename=attachment.name)
+
+    print(f"📧 Submitting {attachment.name} ({attachment.stat().st_size / 1024:.0f} KB) for {to} via {host}...")
+    server = smtp_login(cfg)
+    try:
+        server.send_message(msg)
+    except smtplib.SMTPRecipientsRefused:
+        raise SubmitError("failed", f"Recipient refused: {host} would not send to {to}. Check KINDLE_EMAIL.")
+    except smtplib.SMTPSenderRefused as e:
+        raise SubmitError("failed", f"Sender refused: {host} would not send from {cfg['SENDER_EMAIL']} ({e.smtp_code}).")
+    except smtplib.SMTPDataError as e:
+        raise SubmitError("failed", f"{host} rejected the message ({e.smtp_code} {e.smtp_error.decode(errors='replace')}). "
+                                    "Large books can exceed provider attachment limits.")
+    except (smtplib.SMTPException, OSError) as e:
+        raise SubmitError("unknown", f"The connection to {host} broke while submitting ({e}). The provider may or may not "
+                                     "have accepted the message, so it is not marked as sent. Check your Sent mail, "
+                                     "then run `kindle-sync resolve sent` or `kindle-sync resolve not-sent`.")
+    finally:
+        try:
+            server.quit()
+        except Exception:
+            server.close()
+
+
+def print_submitted(cfg, checks=True):
+    dest, sender = cfg["KINDLE_EMAIL"], cfg["SENDER_EMAIL"]
+    print(f"📤 Submitted to {cfg.host} for delivery to {dest}. Kindle delivery is not confirmed.")
+    if not checks:
+        return
+    test = kindle_test(cfg)
+    if test.get("confirmed_at"):
+        print(f"   Your test from {sender} reached this Kindle on {local_time(test['confirmed_at'])}. "
+              "Check the Kindle once it's on Wi-Fi.")
+        return
+    print("   If it doesn't show up on your Kindle (over Wi-Fi), check:\n"
+          f"   - {sender} is on Amazon's Approved Personal Document E-mail List\n"
+          f"   - Amazon hasn't emailed {sender} a verification request waiting for approval\n"
+          f"   - {dest} is the Send-to-Kindle address of the right device\n"
+          "   - the Kindle is online; sync it from its settings\n"
+          "   `kindle-sync test --troubleshoot` lists more checks.")
+
+
+def before_submit(state, key, args):
+    """Stop before a possible duplicate of a submission with an unknown outcome, and explain what a resend does."""
+    pending = state.get("unknown", {}).get(key)
+    if pending:
+        print(f"⚠️  Outcome unknown: the connection broke while submitting {pending['file']} to "
+              f"{pending['destination']} on {local_time(pending['at'])}, so it may already be on its way.")
+        if args.retry_unknown:
+            print("   Submitting again because of --retry-unknown.")
+        elif not (sys.stdin.isatty() and confirm("   Check your Sent mail first. Submit again anyway? "
+                                                 "Your Kindle may get two copies.")):
+            fail("Not submitted. Look for that email in your Sent mail, then run one of:\n"
+                 "   kindle-sync resolve sent        # it went out: record it as submitted\n"
+                 "   kindle-sync resolve not-sent    # it didn't: clear the warning\n"
+                 "   or add --retry-unknown to submit again anyway.")
+    if key in state.get("submissions", {}):
+        print(RESEND_NOTE)
+
+
+def submit(cfg, path, title, fmt, digest, chapters, state, out_dir):
+    """Submit one book and record the attempt. Only a successful submission marks the book as sent."""
+    key = submission_key(cfg, path.name)
+    record = {"destination": cfg["KINDLE_EMAIL"], "sender": cfg["SENDER_EMAIL"], "smtp": f"{cfg.host}:{cfg.port}",
+              "book": title, "file": path.name, "format": fmt, "digest": digest, "chapters": chapters, "at": now_iso()}
+    try:
+        deliver(cfg, path, title)
+        record["result"] = "submitted"
+        state.setdefault("submissions", {})[key] = record
+        state.get("unknown", {}).pop(key, None)
+    except SubmitError as e:
+        record.update(result=e.result, error=e.message)
+        if e.result == "unknown":
+            state.setdefault("unknown", {})[key] = record
+        raise SystemExit(f"❌ {e.message}")
+    finally:
+        add_history(state, record)
+        write_json(out_dir / STATE_FILE, state)
+    print_submitted(cfg)
+
+
+def file_digest(path):
+    return "file:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def record_build(state, out, digest, chapters, out_dir):
+    state.setdefault("builds", {})[out.name] = {"digest": digest, "chapters": chapters, "built_at": now_iso()}
+    write_json(out_dir / STATE_FILE, state)
+
+
+def describe_changes(old, new):
+    lines = [f"added    {n}" for n in sorted(set(new) - set(old))]
+    lines += [f"changed  {n}" for n in sorted(n for n in new if n in old and old[n] != new[n])]
+    lines += [f"removed  {n}" for n in sorted(set(old) - set(new))]
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Commands
+
+
+def cmd_build(args, workspace):
+    cfg = load_config(workspace, secrets=False)
+    fmt = resolve_format(args.format, cfg, workspace)
+    book = load_book(workspace, args.title)
+    digest, chapters = source_digest(book, fmt), chapter_hashes(book)
+    with locked_state(book.out_dir) as state:
+        record_build(state, build(book, fmt), digest, chapters, book.out_dir)
+
+
+def cmd_send(args, workspace):
+    cfg = load_config(workspace, args.to)
+    require_send_config(cfg)
+    title = book_title(workspace, args.title)
+    out_dir = workspace / "lessons" / "kindle-output"
+    if args.file:
+        path, fmt = args.file.resolve(), args.file.suffix.lower().lstrip(".")
+        if fmt not in FORMATS:
+            fail(f"{path.name} is not a .pdf or .epub file.")
+    else:
+        fmt = resolve_format(args.format, cfg, workspace)
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "book"
+        path = out_dir / f"{slug}.{fmt}"
+    if not path.is_file():
+        fail(f"{path} not found. Run: kindle-sync build --format {fmt}")
+    with locked_state(out_dir) as state:
+        built = state.get("builds", {}).get(path.name) if path.parent == out_dir.resolve() else None
+        before_submit(state, submission_key(cfg, path.name), args)
+        submit(cfg, path, title, fmt, built["digest"] if built else file_digest(path),
+               built.get("chapters") if built else None, state, out_dir)
+
+
+def preview(args, cfg, workspace):
+    fmt, reason = format_choice(args.format, cfg, workspace)
+    book = load_book(workspace, args.title)
+    name = f"{book.slug}.{fmt}"
+    digest, chapters = source_digest(book, fmt), chapter_hashes(book)
+    state = read_json(book.out_dir / STATE_FILE)
+    key = submission_key(cfg, name)
+    last = state.get("submissions", {}).get(key)
+    pending = state.get("unknown", {}).get(key)
+    dest = cfg["KINDLE_EMAIL"]
+    print("Preview only: nothing is built, submitted, or recorded.")
+    print(f"  Destination: {dest} (from {cfg.sources['KINDLE_EMAIL']})" if dest else "  Destination: not set")
+    print(f"  Sender:      {cfg['SENDER_EMAIL'] or 'not set'} via {cfg.host}:{cfg['SMTP_PORT'] or 587}")
+    print(f"  Book:        {name}, “{book.title}”, {len(book.chapters)} chapters, {fmt.upper()} ({reason})")
+    if last:
+        print(f"  Last submitted to this Kindle: {local_time(last['at'])}")
+        changes = describe_changes(last["chapters"], chapters) if last.get("chapters") is not None else None
+        if last["digest"] == digest:
+            print("  Changes:     none")
+        elif changes is None:
+            print("  Changes:     can't list them; that copy was sent without a build record")
+        elif changes:
+            print("  Changes:")
+            for line in changes:
+                print(f"    {line}")
+        else:
+            print("  Changes:     same lessons; the title or the book layout changed")
+    else:
+        print("  Last submitted to this Kindle: never, from this workspace")
+
+    problems = config_problems(cfg) + cfg.warnings
+    if problems:
+        decision = "would stop: Kindle delivery is not set up. Run `kindle-sync doctor` for details."
+    elif last and last["digest"] == digest and not args.force:
+        decision = "would skip: this Kindle already has these lessons (--force would send them again)."
+    elif pending and not args.retry_unknown:
+        decision = (f"would stop and ask: submitting to {pending['destination']} on {local_time(pending['at'])} "
+                    "has an unknown outcome. See `kindle-sync status`.")
+    else:
+        decision = "would build the book and submit it."
+    print(f"  Decision:    {decision}")
+    if decision.startswith("would build") and last:
+        print(RESEND_NOTE)
+
+
+def cmd_sync(args, workspace):
+    cfg = load_config(workspace, args.to)
+    if args.dry_run:
+        return preview(args, cfg, workspace)
+    require_send_config(cfg)
+    fmt = resolve_format(args.format, cfg, workspace)
+    book = load_book(workspace, args.title)
+    digest, chapters = source_digest(book, fmt), chapter_hashes(book)
+    with locked_state(book.out_dir) as state:
+        key = submission_key(cfg, f"{book.slug}.{fmt}")
+        last = state.get("submissions", {}).get(key)
+        if not args.force and last and last["digest"] == digest:
+            print(f"✅ Nothing changed since this book was submitted to {cfg['KINDLE_EMAIL']} on "
+                  f"{local_time(last['at'])}; skipping. Use --force to send it again.")
+            return
+        before_submit(state, key, args)
+        out = build(book, fmt)
+        record_build(state, out, digest, chapters, book.out_dir)
+        submit(cfg, out, book.title, fmt, digest, chapters, state, book.out_dir)
+
+
+def cmd_resolve(args, workspace):
+    out_dir = workspace / "lessons" / "kindle-output"
+    if not read_json(out_dir / STATE_FILE).get("unknown"):
+        print("No submissions with an unknown outcome in this workspace.")
+        return
+    with locked_state(out_dir) as state:
+        pending = state.get("unknown", {})
+        for key, record in list(pending.items()):
+            what = f"{record['file']} → {record['destination']} ({local_time(record['at'])})"
+            if args.outcome == "sent":
+                state.setdefault("submissions", {})[key] = dict(record, result="submitted", error=None)
+                print(f"✅ Recorded {what} as submitted. `sync` won't send it again unless the lessons change.")
+            else:
+                print(f"✅ Cleared the warning for {what}. The next `kindle-sync sync` submits it normally.")
+            del pending[key]
+            add_history(state, record, result=f"resolved-{args.outcome}", error=None, at=now_iso())
+        write_json(out_dir / STATE_FILE, state)
+
+
+def ask(prompt, default="", check=None):
+    while True:
+        try:
+            answer = input(prompt + (f" [{default}]" if default else "") + ": ").strip() or default
+        except EOFError:
+            fail("Setup needs answers. Run `kindle-sync setup` yourself in a terminal.")
+        error = check(answer) if check else (None if answer else "This is required.")
+        if not error:
+            return answer
+        print(f"   {error}")
+
+
+def confirm(prompt):
+    """Yes only on an explicit y; no answer (no terminal) means no."""
+    try:
+        return input(prompt + " [y/N]: ").strip().lower() in ("y", "yes")
+    except (EOFError, OSError):
+        return False
+
+
+def cmd_test(args, workspace):
+    cfg = load_config(workspace, args.to)
+    if args.troubleshoot:
+        print(troubleshooting(cfg))
+        return
+    require_send_config(cfg)
+    if args.confirm:
+        record_test(cfg, confirmed=True)
+        print(f"✅ Recorded that test documents from {cfg['SENDER_EMAIL']} reach {cfg['KINDLE_EMAIL']}.")
+        return
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    soup = BeautifulSoup(f"<body><h1>kindle-sync test</h1><p>Sent {stamp} from {html.escape(cfg['SENDER_EMAIL'])}. "
+                         "If you can read this on your Kindle, delivery works.</p></body>", "html.parser")
+    book = Book(workspace, f"kindle-sync test {stamp}", "en", [Chapter("ch01", "lesson", Path("test.html"), "kindle-sync test", soup.body)])
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "kindle-sync-test.epub"
+        render_epub(book, path)
+        try:
+            deliver(cfg, path, book.title)
+        except SubmitError as e:
+            fail(e.message)
+    record_test(cfg, confirmed=False)
+    print_submitted(cfg, checks=False)
+    if confirm("\nIt can take a few minutes. Has it arrived on your Kindle?"):
+        record_test(cfg, confirmed=True)
+        print("✅ Arrival confirmed by you. Run `kindle-sync sync` in a workspace to send your lessons.")
+    else:
+        print("\n" + troubleshooting(cfg))
+
+
+def cmd_setup(args, workspace):
+    target = workspace / ".kindle-creds" if args.workspace_config else user_config_dir() / "config"
+    current = load_config(workspace)
+    print("Set up Kindle delivery. kindle-sync emails books to your Send-to-Kindle address from your own mail account.\n"
+          "It never needs your Amazon password, and it can't link to your Amazon account.\n")
+    kindle = ask("Send-to-Kindle email (amazon.com/myk → Devices → your Kindle)", current["KINDLE_EMAIL"], email_error)
+    if not kindle.lower().endswith(KINDLE_DOMAINS):
+        print("   ⚠️  Send-to-Kindle addresses usually end in @kindle.com; double-check it.")
+    sender = ask("Your email address (kindle-sync sends from it)", current["SENDER_EMAIL"], email_error)
+    preset = SMTP_PRESETS.get(sender.rsplit("@", 1)[-1].lower(), ("", "587"))
+    host = ask("SMTP server", current["SMTP_HOST"] or preset[0])
+    port = ask("SMTP port (587 = STARTTLS, 465 = SSL)", current["SMTP_PORT"] or preset[1], port_error)
+    user = ask("SMTP login", current["SMTP_USER"] or sender)
+    keep = current["SMTP_PASSWORD"] if current.sources.get("SMTP_PASSWORD") != "environment variable" else ""
+    print("\nCreate an app password for kindle-sync in your mail account (Gmail: myaccount.google.com/apppasswords,\n"
+          "which needs 2-Step Verification). Your normal mail password usually won't work.")
+    while True:
+        try:
+            password = getpass.getpass("App password (hidden" + ("; Enter keeps the saved one" if keep else "") + "): ")
+        except EOFError:
+            fail("Setup needs answers. Run `kindle-sync setup` yourself in a terminal.")
+        password = password.strip() or keep
+        if password:
+            break
+        print("   This is required.")
+    fmt = ask("Book format: epub (reflowable, adjustable text) or pdf (fixed 4.5×6in pages)",
+              current["FORMAT"].lower() or "epub", lambda v: None if v in FORMATS else "Enter epub or pdf.")
+
+    print("\nAmazon only accepts documents from approved senders. kindle-sync can't do this step for you:\n"
+          "  1. Open https://www.amazon.com/myk → Preferences → Personal Document Settings.\n"
+          f"  2. Under Approved Personal Document E-mail List, add {sender}.\n"
+          f"  3. Check that {kindle} is the Send-to-Kindle address of the device you want.")
+    try:
+        input("Press Enter once the sender is approved... ")
+    except (EOFError, OSError):
+        pass
+
+    values = {"KINDLE_EMAIL": kindle, "SENDER_EMAIL": sender, "SMTP_HOST": host, "SMTP_PORT": port,
+              "SMTP_USER": user, "FORMAT": fmt}
+    backend, where = keyring_backend(), None
+    if backend:
+        try:
+            backend.set_password(KEYRING_SERVICE, user, password)
+            where = "your system keyring"
+        except Exception as e:
+            print(f"⚠️  Could not save to the system keyring ({type(e).__name__}); saving to {target} instead.")
+    if not where:
+        values["SMTP_PASSWORD"], where = password, f"{target} (readable only by you)"
+    lines = ["# kindle-sync settings, written by `kindle-sync setup`. Environment variables override them."]
+    write_atomic(target, "\n".join(lines + [f"{k}={v}" for k, v in values.items()]) + "\n", mode=0o600)
+    os.chmod(target, 0o600)
+    print(f"\n✅ Saved settings to {target}; the app password is in {where}.")
+
+    saved = load_config(workspace)
+    for key in CONFIG_KEYS:
+        if saved.sources.get(key) not in (str(target), "system keyring", None):
+            print(f"ℹ️  {key} still comes from {saved.sources[key]}, which takes precedence over {target}.")
+    if confirm(f"\nCheck the login to {saved.host} now? It sends nothing."):
+        try:
+            smtp_login(saved).quit()
+            print(f"✅ Logged in to {saved.host} as {saved.user}.")
+        except SubmitError as e:
+            print(f"❌ {e.message}\n   Fix it with `kindle-sync setup`, then check with `kindle-sync doctor --check-login`.")
+            return
+    if confirm(f"\nSend a small test document to {saved['KINDLE_EMAIL']} now?"):
+        args.to, args.confirm, args.troubleshoot = None, False, False
+        cmd_test(args, workspace)
+    else:
+        print("Send one later with `kindle-sync test`.")
+    print("\nSee your setup progress any time with `kindle-sync status`.")
+
+
+def smtp_account(path):
+    values = pick(read_kv(path))
+    return values.get("SMTP_USER") or values.get("SENDER_EMAIL")
+
+
+def cmd_reset(args, workspace):
+    if args.workspace_config:
+        scope = [workspace / ".kindle-creds"]
+    else:
+        scope = [user_config_dir() / "config", Path.home() / ".kindle-creds"]
+    files = [p for p in scope if p.is_file()]
+    progress = [onboarding_path()] if not args.workspace_config and onboarding_path().is_file() else []
+    # Keep a keyring password that another settings file still uses.
+    in_use = {smtp_account(p) for p in config_files(workspace) if p not in scope and p.is_file()}
+    backend, passwords = keyring_backend(), []
+    for account in sorted({smtp_account(p) for p in files} - {None}):
+        try:
+            if backend and backend.get_password(KEYRING_SERVICE, account):
+                if account in in_use:
+                    print(f"ℹ️  Keeping the keyring password for {account}: another settings file uses it.")
+                else:
+                    passwords.append(account)
+        except Exception:
+            pass
+    env = [n for n in CONFIG_KEYS + ("GMAIL_ADDRESS", "GMAIL_APP_PASSWORD") if os.environ.get(n)]
+
+    if not (files or passwords or progress):
+        print("No saved delivery settings to remove.")
+    else:
+        print("This removes:")
+        for p in files:
+            values = pick(read_kv(p))
+            details = [f"{k}={values[k]}" for k in ("KINDLE_EMAIL", "SENDER_EMAIL") if values.get(k)]
+            if values.get("SMTP_PASSWORD"):
+                details.append("the app password")
+            print(f"  - {p}" + (f": {', '.join(details)}" if details else ""))
+        for account in passwords:
+            print(f"  - the app password for {account} in your system keyring")
+        for p in progress:
+            print(f"  - your login and test-delivery progress in {p}")
+        print("Submission history in your workspaces is kept, so unchanged books aren't sent again.")
+        if not confirm("Delete these?"):
+            print("Nothing was removed.")
+            return
+        for p in files + progress:
+            p.unlink()
+        for account in passwords:
+            try:
+                backend.delete_password(KEYRING_SERVICE, account)
+            except Exception as e:
+                print(f"⚠️  Could not remove the keyring password for {account} ({type(e).__name__}).")
+        print("✅ Removed. Run `kindle-sync setup` to set up delivery again.")
+    if env:
+        print(f"ℹ️  These environment variables still set delivery settings; unset them yourself: {', '.join(env)}")
+
+
+def cmd_doctor(args, workspace):
+    cfg = load_config(workspace)
+    errors = 0
+
+    def report(level, text):
+        nonlocal errors
+        errors += level == "error"
+        print({"ok": "✅", "warn": "⚠️ ", "error": "❌", "info": "ℹ️ "}[level], text)
+
+    print("Settings files (highest precedence first, after environment variables):")
+    for path in config_files(workspace):
+        state = ("found, readable by other users" if too_open(path) else "found") if path.is_file() else "not found"
+        print(f"   {path}: {state}")
+    backend = keyring_backend()
+    report("ok" if backend else "info", f"System keyring: {type(backend).__name__}" if backend
+           else "System keyring: not available, so `kindle-sync setup` stores the password in a chmod 600 file")
+    for key in ("KINDLE_EMAIL", "SENDER_EMAIL", "SMTP_USER", "SMTP_HOST", "SMTP_PORT"):
+        if cfg[key]:
+            report("ok", f"{key} = {cfg[key]} (from {cfg.sources[key]})")
+    if cfg["SMTP_PASSWORD"]:
+        report("ok", f"SMTP_PASSWORD is set (from {cfg.sources['SMTP_PASSWORD']})")
+    problems = config_problems(cfg)
+    for problem in problems:
+        report("error", problem)
+    for warning in cfg.warnings:
+        report("warn", warning)
+    if cfg["KINDLE_EMAIL"] and not cfg["KINDLE_EMAIL"].lower().endswith(KINDLE_DOMAINS):
+        report("warn", "KINDLE_EMAIL doesn't end in @kindle.com; check it's your Send-to-Kindle address")
+    domain = cfg["SENDER_EMAIL"].rsplit("@", 1)[-1].lower()
+    if cfg["SENDER_EMAIL"] and not cfg["SMTP_HOST"] and domain not in ("gmail.com", "googlemail.com"):
+        report("warn", f"SMTP_HOST is not set, so smtp.gmail.com is used for {cfg['SENDER_EMAIL']}")
+
+    fmt, reason = format_choice(None, cfg, workspace)
+    report("ok", f"Format: {fmt} ({reason})")
+    try:
+        import weasyprint  # noqa: F401
+        report("ok", "PDF output: WeasyPrint is usable")
+    except (ImportError, OSError) as e:
+        report("error" if fmt == "pdf" else "info", f"PDF output: WeasyPrint is not usable ({e}); EPUB output still works")
+    lessons = list((workspace / "lessons").glob("[0-9]*.html"))
+    report("ok" if lessons else "warn", f"Workspace {workspace}: {len(lessons)} lessons")
+    for record in read_json(workspace / "lessons" / "kindle-output" / STATE_FILE).get("unknown", {}).values():
+        report("warn", f"Outcome unknown for {record['file']} → {record['destination']} "
+                       f"({local_time(record['at'])}); see `kindle-sync status`")
+
+    if args.check_login and not problems:
+        try:
+            smtp_login(cfg).quit()
+            report("ok", f"Logged in to {cfg.host} as {cfg.user}. This checks your mail account only, "
+                         "not whether Amazon accepts the sender.")
+        except SubmitError as e:
+            report("error", e.message)
+    elif not args.check_login:
+        report("info", "Network not checked. `kindle-sync doctor --check-login` tests the login without sending; "
+                       "`kindle-sync test` sends a test document.")
+    if errors:
+        raise SystemExit(1)
+
+
+RESULT_LABELS = {
+    "submitted": "submitted to the mail provider (Kindle delivery not confirmed)",
+    "failed": "failed",
+    "unknown": "OUTCOME UNKNOWN: check your Sent mail",
+    "resolved-sent": "you found it in Sent mail; recorded as submitted",
+    "resolved-not-sent": "you found it wasn't sent; warning cleared",
+}
+
+
+def cmd_status(args, workspace):
+    cfg = load_config(workspace)
+    state = read_json(workspace / "lessons" / "kindle-output" / STATE_FILE)
+    for record in state.get("unknown", {}).values():
+        print(f"⚠️  OUTCOME UNKNOWN: {record['file']} → {record['destination']} on {local_time(record['at'])}\n"
+              "   The connection broke while submitting, so it may or may not have gone out, and `sync` won't\n"
+              "   submit it again until you check. Look for it in your Sent mail, then run\n"
+              "   `kindle-sync resolve sent` or `kindle-sync resolve not-sent`.\n")
+
+    def show(key, empty="not set"):
+        return f"{cfg[key]} (from {cfg.sources[key]})" if cfg[key] else empty
+
+    fmt, reason = format_choice(None, cfg, workspace)
+    print(f"Destination: {show('KINDLE_EMAIL', 'not set (run `kindle-sync setup`)')}")
+    print(f"Sender:      {show('SENDER_EMAIL')}")
+    print(f"Mail server: {cfg.host}:{cfg['SMTP_PORT'] or 587}, login {cfg.user or 'not set'}")
+    print(f"Password:    {'set (from ' + cfg.sources['SMTP_PASSWORD'] + ')' if cfg['SMTP_PASSWORD'] else 'not set'}")
+    print(f"Format:      {fmt} ({reason})")
+    for warning in cfg.warnings:
+        print(f"⚠️  {warning}")
+    print("\nSetup progress:")
+    for mark, text in onboarding_steps(cfg):
+        print(f"  {mark} {text}")
+
+    history = state.get("history", [])
+    if not history:
+        print("\nNo submissions from this workspace yet.")
+        return
+    print("\nRecent submissions, newest first:")
+    for entry in reversed(history[-5:]):
+        print(f"  {local_time(entry['at'])}  {entry['file']} ({entry['format']}) → {entry['destination']}: "
+              f"{RESULT_LABELS.get(entry['result'], entry['result'])}")
+        if entry.get("error"):
+            print(f"      {entry['error']}")
 
 
 def main(argv=None):
-    common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("-w", "--workspace", type=Path, default=Path.cwd(), help="workspace root (default: current directory)")
-    common.add_argument("-f", "--format", choices=["pdf", "epub"], default="pdf", help="book format (default: pdf)")
+    workspace_arg = argparse.ArgumentParser(add_help=False)
+    workspace_arg.add_argument("-w", "--workspace", type=Path, default=Path.cwd(), help="workspace root (default: current directory)")
+    common = argparse.ArgumentParser(add_help=False, parents=[workspace_arg])
+    common.add_argument("-f", "--format", choices=FORMATS, help="book format (default: FORMAT from setup, else epub)")
     common.add_argument("--title", help="book title (default: `# Mission: <Topic>` in MISSION.md, else the folder name)")
+    to_arg = argparse.ArgumentParser(add_help=False)
+    to_arg.add_argument("--to", metavar="EMAIL", help="send to this Kindle address instead of KINDLE_EMAIL")
+    retry_arg = argparse.ArgumentParser(add_help=False)
+    retry_arg.add_argument("--retry-unknown", action="store_true",
+                           help="submit even though an earlier submission's outcome is unknown (may send a duplicate)")
 
     parser = argparse.ArgumentParser(prog="kindle-sync", description=__doc__.split("\n\n")[0].strip())
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("build", parents=[common], help="build the book into lessons/kindle-output/")
-    send_cmd = sub.add_parser("send", parents=[common], help="email the built book to your Kindle")
+    send_cmd = sub.add_parser("send", parents=[common, to_arg, retry_arg], help="email the built book to your Kindle")
     send_cmd.add_argument("file", nargs="?", type=Path, help="book to send (default: the built book for --format)")
-    sync_cmd = sub.add_parser("sync", parents=[common], help="build, then send if lessons changed since the last send")
-    sync_cmd.add_argument("--force", action="store_true", help="send even if nothing changed")
+    sync_cmd = sub.add_parser("sync", parents=[common, to_arg, retry_arg],
+                              help="build, then send if lessons changed since the last submission")
+    sync_cmd.add_argument("--force", action="store_true", help="send again even if nothing changed")
+    sync_cmd.add_argument("--dry-run", action="store_true",
+                          help="show the destination, format, changed lessons, and decision; build, send, and record nothing")
+    setup_cmd = sub.add_parser("setup", parents=[workspace_arg], help="set up Kindle delivery interactively")
+    setup_cmd.add_argument("--workspace-config", action="store_true",
+                           help="save to <workspace>/.kindle-creds instead of your user settings")
+    doctor_cmd = sub.add_parser("doctor", parents=[workspace_arg], help="check settings and dependencies")
+    doctor_cmd.add_argument("--check-login", action="store_true", help="also log in to the mail server (sends nothing)")
+    sub.add_parser("status", parents=[workspace_arg], help="show settings, setup progress, and recent submissions")
+    test_cmd = sub.add_parser("test", parents=[workspace_arg, to_arg], help="send a small test document to your Kindle")
+    test_cmd.add_argument("--confirm", action="store_true", help="record that the test document arrived (sends nothing)")
+    test_cmd.add_argument("--troubleshoot", action="store_true", help="list what to check when it hasn't arrived (sends nothing)")
+    resolve_cmd = sub.add_parser("resolve", parents=[workspace_arg],
+                                 help="record whether a submission with an unknown outcome went out")
+    resolve_cmd.add_argument("outcome", choices=["sent", "not-sent"],
+                             help="sent: it is in your Sent mail; not-sent: it isn't, so sync may submit it again")
+    reset_cmd = sub.add_parser("reset", parents=[workspace_arg],
+                               help="delete saved delivery settings and the app password (asks first)")
+    reset_cmd.add_argument("--workspace-config", action="store_true",
+                           help="remove <workspace>/.kindle-creds instead of your user settings")
     args = parser.parse_args(argv)
 
-    workspace = args.workspace.resolve()
-    if args.command == "send":
-        title = book_title(workspace, args.title)
-        path = args.file
-        if path is None:
-            slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "book"
-            path = workspace / "lessons" / "kindle-output" / f"{slug}.{args.format}"
-        if not path.is_file():
-            fail(f"{path} not found. Run: kindle-sync build" + (" --format epub" if args.format == "epub" else ""))
-        send(path, workspace, title)
-        return
-
-    book = load_book(workspace, args.title)
-    if args.command == "build":
-        build(book, args.format)
-        return
-
-    digest = source_digest(book, args.format)
-    marker = book.out_dir / f".last-sent-{args.format}"
-    if not args.force and marker.is_file() and marker.read_text().strip() == digest:
-        print("✅ Nothing changed since the last send; skipping. Use --force to send anyway.")
-        return
-    out = build(book, args.format)
-    send(out, workspace, book.title)
-    marker.write_text(digest + "\n")
+    commands = {"build": cmd_build, "send": cmd_send, "sync": cmd_sync, "setup": cmd_setup, "doctor": cmd_doctor,
+                "status": cmd_status, "test": cmd_test, "resolve": cmd_resolve, "reset": cmd_reset}
+    commands[args.command](args, args.workspace.resolve())
 
 
 if __name__ == "__main__":

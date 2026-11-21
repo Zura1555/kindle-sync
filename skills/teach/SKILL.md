@@ -75,4 +75,4 @@ document.querySelectorAll('.quiz-block .options').forEach(opts => {
 - Glossaries, once created, should be adhered to in every lesson.
 
 ## Compatibility
-This skill works with `kindle-sync` — compile lessons to PDF and send to Kindle for offline review.
+This skill works with `kindle-sync` — compile lessons into a Kindle book and send it to a Kindle for offline review.
