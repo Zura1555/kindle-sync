@@ -132,7 +132,8 @@ python -m http.server 8000 --directory build/site
 ```
 
 Open the server in your browser. The reader includes a responsive sidebar, Previous/Next
-navigation, and shareable hash URLs that also work after a refresh on GitHub Pages.
+navigation, a course switcher, a topic jump menu, and shareable hash URLs that also work
+after a refresh on GitHub Pages. Previous/Next stays within the selected course.
 The lesson count and navigation update on each build. Use zero-padded filenames such as
 `0001-introduction.html` and `0002-next-topic.html` to control lesson order. The builder
 copies only the published Markdown pages, selected HTML files, and an optional workspace
@@ -140,14 +141,44 @@ copies only the published Markdown pages, selected HTML files, and an optional w
 Never put private files in published HTML or `assets/`. Credentials, learning records,
 and Kindle output are not included by the builder.
 
+### Courses and Topics
+
+The default build publishes `demo-workspace/` plus every course folder containing
+`courses/<course-name>/MISSION.md`. Each course uses the same workspace layout:
+`MISSION.md`, numbered HTML files in `lessons/`, optional `reference/`, `RESOURCES.md`,
+and `assets/`. The course title comes from `# Mission: <Title>` in its `MISSION.md`.
+Adding a course folder and pushing it to `main` makes it appear in the course dropdown.
+Only PostgreSQL is included initially; there are no placeholder courses.
+
+To assign a lesson to a topic, add metadata inside its HTML `<head>`:
+
+```html
+<meta name="topic" content="SQL Fundamentals">
+```
+
+Lessons without topic metadata appear under **General**. Topics appear in the sidebar
+and jump menu automatically, in lesson order. Selecting a topic opens its first lesson;
+it does not hide the rest of the course. Topic metadata does not change Kindle output.
+The original demo course's published lesson URLs remain unchanged.
+
+To publish an explicit set of workspaces instead of using discovery, repeat the option:
+
+```bash
+python scripts/build_site.py --workspace demo-workspace --workspace courses/python
+```
+
+Workspace folder names must be unique. The first workspace retains the original
+`content/` URL layout; additional courses use `content/courses/<folder-name>/`.
+Keep the workspace order stable when using explicit options so shared URLs stay stable.
+
 ### GitHub Pages
 
 1. In the repository's **Settings → Pages → Build and deployment**, select **GitHub Actions**.
-2. Push these changes to `main`. The **Lesson site** workflow builds `demo-workspace/`
+2. Push these changes to `main`. The **Lesson site** workflow discovers the courses above
    and deploys the generated site to GitHub Pages. Pull requests build the site without deploying.
 3. Open the URL shown in the workflow's `github-pages` deployment environment.
 
-To publish a different workspace committed to the repository, change `--workspace demo-workspace`
+To override automatic discovery, add one or more `--workspace` options to the build command
 in `.github/workflows/pages.yml`. To build one locally, use
 `python scripts/build_site.py --workspace path/to/workspace --output build/site`.
 The output directory is replaced on rebuild; an existing non-generated directory is rejected.

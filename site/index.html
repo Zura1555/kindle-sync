@@ -12,7 +12,16 @@
   <a class="skip-link" href="#reader">Skip to content</a>
   <aside id="sidebar" aria-label="Course sidebar">
     <a class="brand" href="#"><span class="brand-icon" aria-hidden="true">↗</span> kindle-sync <span class="edition">LEARN</span></a>
-    <div class="course-heading"><p class="eyebrow">YOUR LEARNING SPACE</p><h1 id="course-title">Lesson reader</h1><p id="course-count"></p></div>
+    <div class="course-heading">
+      <h1 id="course-title" class="sr-only">Lesson reader</h1>
+      <label class="eyebrow" for="course-select">COURSE</label>
+      <select id="course-select" disabled><option>Loading courses…</option></select>
+      <p id="course-count"></p>
+      <div id="topic-control" hidden>
+        <label class="eyebrow" for="topic-select">JUMP TO TOPIC</label>
+        <select id="topic-select"></select>
+      </div>
+    </div>
     <nav id="navigation" aria-label="Course contents"></nav>
     <div class="sidebar-footer"><span class="source-dot" aria-hidden="true"></span> Content lives in your repository</div>
   </aside>

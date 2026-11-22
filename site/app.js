@@ -29,44 +29,81 @@ matchMedia('(min-width: 761px)').addEventListener('change', () => setMenu(false)
 async function init() {
   const response = await fetch('course.json');
   if (!response.ok) throw new Error('Course not available');
-  const course = await response.json();
-  document.querySelector('#course-title').textContent = course.title;
-  document.querySelector('#breadcrumb-course').textContent = course.title;
-  const lessons = course.pages.filter(page => page.section === 'Lessons');
-  document.querySelector('#course-count').textContent = `${lessons.length} ${lessons.length === 1 ? 'lesson' : 'lessons'} · Self-paced`;
+  const { courses } = await response.json();
+  const courseSelect = document.querySelector('#course-select');
+  const topicSelect = document.querySelector('#topic-select');
+  courseSelect.replaceChildren(...courses.map(course => new Option(course.title, course.id)));
+  courseSelect.disabled = false;
   const navigation = document.querySelector('#navigation');
-  let lastSection;
-  let lessonNumber = 0;
-  for (const page of course.pages) {
-    if (page.section !== lastSection) {
-      const heading = document.createElement('h2');
-      heading.textContent = page.section;
-      navigation.append(heading);
-      lastSection = page.section;
+  let course;
+  let lessons;
+
+  courseSelect.addEventListener('change', () => {
+    const selected = courses.find(item => item.id === courseSelect.value);
+    location.hash = encodeURIComponent(selected.pages[0].path);
+  });
+  topicSelect.addEventListener('change', () => {
+    const first = lessons.find(page => page.topic === topicSelect.value);
+    location.hash = encodeURIComponent(first.path);
+  });
+
+  function renderCourse(selected) {
+    course = selected;
+    lessons = course.pages.filter(page => page.section === 'Lessons');
+    const topics = [...new Set(lessons.map(page => page.topic))];
+    courseSelect.value = course.id;
+    document.querySelector('#course-title').textContent = course.title;
+    document.querySelector('#breadcrumb-course').textContent = course.title;
+    document.querySelector('#course-count').textContent = `${lessons.length} ${lessons.length === 1 ? 'lesson' : 'lessons'} · ${topics.length} ${topics.length === 1 ? 'topic' : 'topics'}`;
+    topicSelect.replaceChildren(new Option('Choose a topic', ''), ...topics.map(topic => new Option(topic, topic)));
+    topicSelect.options[0].disabled = true;
+    document.querySelector('#topic-control').hidden = !topics.length;
+    navigation.replaceChildren();
+    let lastSection;
+    let lastTopic;
+    let lessonNumber = 0;
+    for (const page of course.pages) {
+      if (page.section !== lastSection) {
+        const heading = document.createElement('h2');
+        heading.textContent = page.section;
+        navigation.append(heading);
+        lastSection = page.section;
+      }
+      if (page.section === 'Lessons' && page.topic !== lastTopic) {
+        if (topics.length > 1 || page.topic !== 'General') {
+          const heading = document.createElement('h3');
+          heading.textContent = page.topic;
+          navigation.append(heading);
+        }
+        lastTopic = page.topic;
+      }
+      const link = document.createElement('a');
+      link.href = `#${encodeURIComponent(page.path)}`;
+      const number = document.createElement('span');
+      number.className = 'nav-number';
+      number.textContent = page.section === 'Lessons' ? String(++lessonNumber).padStart(2, '0') : '—';
+      const title = document.createElement('span');
+      title.textContent = page.title;
+      link.append(number, title);
+      navigation.append(link);
     }
-    const link = document.createElement('a');
-    link.href = `#${encodeURIComponent(page.path)}`;
-    const number = document.createElement('span');
-    number.className = 'nav-number';
-    number.textContent = page.section === 'Lessons' ? String(++lessonNumber).padStart(2, '0') : '—';
-    const title = document.createElement('span');
-    title.textContent = page.title;
-    link.append(number, title);
-    navigation.append(link);
-  }
-  if (!lessons.length) {
-    const empty = document.createElement('p');
-    empty.className = 'empty';
-    empty.textContent = 'No lessons yet. Add numbered HTML files to lessons/ and rebuild.';
-    navigation.append(empty);
+    if (!lessons.length) {
+      const empty = document.createElement('p');
+      empty.className = 'empty';
+      empty.textContent = 'No lessons yet. Add numbered HTML files to lessons/ and rebuild.';
+      navigation.append(empty);
+    }
   }
 
   function navigate() {
+    const selected = courses.find(item => item.pages.some(page => `#${encodeURIComponent(page.path)}` === location.hash)) || courses[0];
+    if (course !== selected) renderCourse(selected);
     const index = course.pages.findIndex(page => `#${encodeURIComponent(page.path)}` === location.hash);
     const current = index < 0 ? 0 : index;
     const page = course.pages[current];
+    topicSelect.value = page.topic || '';
     document.title = `${page.title} · ${course.title}`;
-    document.querySelector('#current-section').textContent = page.section === 'Lessons' ? `Lesson ${lessons.indexOf(page) + 1}` : page.title;
+    document.querySelector('#current-section').textContent = page.section === 'Lessons' ? `${page.topic === 'General' ? '' : page.topic + ' · '}Lesson ${lessons.indexOf(page) + 1}` : page.title;
     navigation.querySelectorAll('a').forEach(link => {
       if (link.hash === `#${encodeURIComponent(page.path)}`) link.setAttribute('aria-current', 'page');
       else link.removeAttribute('aria-current');

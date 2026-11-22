@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -11,8 +12,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def build(workspace, output):
+    workspaces = [workspace] if isinstance(workspace, Path) else workspace
+    arguments = [argument for path in workspaces for argument in ["--workspace", str(path)]]
     return subprocess.run(
-        [sys.executable, str(ROOT / "scripts/build_site.py"), "--workspace", str(workspace), "--output", str(output)],
+        [sys.executable, str(ROOT / "scripts/build_site.py"), *arguments, "--output", str(output)],
         capture_output=True, text=True,
     )
 
@@ -38,7 +41,7 @@ def test_site_publishes_ordered_content_without_private_workspace_files(tmp_path
     output = tmp_path / "site"
     result = build(workspace, output)
     assert result.returncode == 0, result.stderr
-    course = json.loads((output / "course.json").read_text())
+    course = json.loads((output / "course.json").read_text())["courses"][0]
     assert course["title"] == "SQL & Data"
     assert [page["title"] for page in course["pages"]] == ["Overview", "First & foremost", "Second lesson", "Glossary", "Resources"]
     for page in course["pages"]:
@@ -71,8 +74,53 @@ def test_empty_workspace_can_publish_an_overview(tmp_path):
     output = tmp_path / "site"
     result = build(workspace, output)
     assert result.returncode == 0, result.stderr
-    course = json.loads((output / "course.json").read_text())
+    course = json.loads((output / "course.json").read_text())["courses"][0]
     assert [page["title"] for page in course["pages"]] == ["Overview"]
+
+
+def test_multiple_courses_keep_lessons_assets_and_topics_separate(tmp_path):
+    workspaces = [tmp_path / "sql", tmp_path / "python"]
+    for workspace, title, topics in zip(workspaces, ["SQL", "Python"], [["Queries", "Indexes"], [None, "Functions"]]):
+        (workspace / "lessons").mkdir(parents=True)
+        (workspace / "assets").mkdir()
+        (workspace / "MISSION.md").write_text(f"# Mission: {title}\n\nLearn {title}.")
+        (workspace / "assets/chart.svg").write_text(f"<svg>{title}</svg>")
+        for index, topic in enumerate(topics, 1):
+            metadata = f'<meta name="topic" content="{topic}">' if topic else ""
+            (workspace / f"lessons/{index:04}-lesson.html").write_text(f'{metadata}<h1>{title} lesson {index}</h1><img src="../assets/chart.svg">')
+    output = tmp_path / "site"
+    result = build(workspaces, output)
+    assert result.returncode == 0, result.stderr
+    courses = json.loads((output / "course.json").read_text())["courses"]
+    assert [course["title"] for course in courses] == ["SQL", "Python"]
+    assert [course["id"] for course in courses] == ["sql", "python"]
+    assert [[page["topic"] for page in course["pages"] if page["section"] == "Lessons"] for course in courses] == [["Queries", "Indexes"], ["General", "Functions"]]
+    assert courses[0]["pages"][1]["path"] == "content/lessons/0001-lesson.html"
+    paths = [page["path"] for course in courses for page in course["pages"]]
+    assert len(paths) == len(set(paths))
+    for course in courses:
+        for page in course["pages"]:
+            path = output / page["path"]
+            soup = BeautifulSoup(path.read_text(), "html.parser")
+            assert course["title"] in soup.get_text()
+            if page["section"] == "Lessons":
+                asset = (path.parent / soup.img["src"]).resolve()
+                assert course["title"] in asset.read_text()
+            else:
+                assert (path.parent / soup.link["href"]).resolve() == output / "reading.css"
+
+    # The Pages command discovers real course folders without a hand-maintained list.
+    repository = tmp_path / "repository"
+    (repository / "scripts").mkdir(parents=True)
+    shutil.copyfile(ROOT / "scripts/build_site.py", repository / "scripts/build_site.py")
+    shutil.copytree(ROOT / "site", repository / "site")
+    shutil.copytree(workspaces[0], repository / "demo-workspace")
+    shutil.copytree(workspaces[1], repository / "courses/python")
+    (repository / "courses/not-a-course").mkdir()
+    result = subprocess.run([sys.executable, str(repository / "scripts/build_site.py"), "--output", str(output)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    discovered = json.loads((output / "course.json").read_text())["courses"]
+    assert [course["title"] for course in discovered] == ["SQL", "Python"]
 
 
 @pytest.mark.parametrize("destination", ["workspace", "workspace/output", "existing"])

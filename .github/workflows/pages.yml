@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install '.[site]'
-      - run: python scripts/build_site.py --workspace demo-workspace --output build/site
+      - run: python scripts/build_site.py --output build/site
       - uses: actions/upload-pages-artifact@v3
         with:
           path: build/site

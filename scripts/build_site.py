@@ -20,32 +20,19 @@ def external_links(soup):
         link["rel"] = "noopener noreferrer"
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--workspace", type=Path, default=ROOT / "demo-workspace")
-    parser.add_argument("--output", type=Path, default=ROOT / "build/site")
-    args = parser.parse_args()
-    workspace = args.workspace.resolve()
-    output = args.output.resolve()
-    # The generated directory is replaced on every build; never delete source content.
-    if output == ROOT or output in ROOT.parents or output == workspace or output in workspace.parents or workspace in output.parents:
-        parser.error("Output must be separate from the workspace and must not contain the repository.")
-    if output.exists() and not ((output / ".nojekyll").is_file() and (output / "course.json").is_file()):
-        parser.error("Refusing to replace a directory that is not a generated lesson site.")
+def build_course(workspace, output, content_path):
     mission = (workspace / "MISSION.md").read_text(encoding="utf-8")
     heading = re.search(r"^#\s+(?:Mission:\s*)?(.+)$", mission, re.MULTILINE)
     title = heading.group(1).strip() if heading else workspace.name
-    if output.exists():
-        shutil.rmtree(output)
-    shutil.copytree(ROOT / "site", output)
-    content = output / "content"
-    content.mkdir()
+    content = output / content_path
+    content.mkdir(parents=True, exist_ok=True)
+    stylesheet = "../" * len(content_path.parts) + "reading.css"
     pages = []
     for filename, label in [("MISSION.md", "Overview"), ("RESOURCES.md", "Resources")]:
         source = workspace / filename
         if not source.exists():
             continue
-        destination = Path("content") / (source.stem.lower() + ".html")
+        destination = content_path / (source.stem.lower() + ".html")
         body = markdown.markdown(source.read_text(encoding="utf-8"), extensions=["extra", "sane_lists"])
         # Render plain URLs in the existing resources file as usable links.
         soup = BeautifulSoup(body, "html.parser")
@@ -63,7 +50,7 @@ def main():
                         text.insert_before(part)
                 text.extract()
         external_links(soup)
-        document = f'<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{html.escape(label)}</title><link rel="stylesheet" href="../reading.css"><body><article>{soup}</article></body></html>'
+        document = f'<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{html.escape(label)}</title><link rel="stylesheet" href="{stylesheet}"><body><article>{soup}</article></body></html>'
         (output / destination).write_text(document, encoding="utf-8")
         pages.append({"path": destination.as_posix(), "title": label, "section": "Course" if label == "Overview" else "Resources"})
 
@@ -74,18 +61,51 @@ def main():
             soup = BeautifulSoup(source.read_text(encoding="utf-8"), "html.parser")
             heading = soup.find("h1") or soup.title
             label = heading.get_text(" ", strip=True) if heading else source.stem
-            destination = Path("content") / folder / source.name
+            destination = content_path / folder / source.name
             (output / destination).parent.mkdir(parents=True, exist_ok=True)
             external_links(soup)
             (output / destination).write_text(str(soup), encoding="utf-8")
-            pages.append({"path": destination.as_posix(), "title": label, "section": section})
+            page = {"path": destination.as_posix(), "title": label, "section": section}
+            if section == "Lessons":
+                topic = soup.find("meta", attrs={"name": "topic"})
+                page["topic"] = (topic.get("content", "").strip() if topic else "") or "General"
+            pages.append(page)
     pages.extend(resources)
     # Assets are opt-in; never copy credentials, learning records, or Kindle output.
     if (workspace / "assets").is_dir():
         shutil.copytree(workspace / "assets", content / "assets")
-    (output / "course.json").write_text(json.dumps({"title": title, "pages": pages}, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"id": workspace.name, "title": title, "pages": pages}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--workspace", type=Path, action="append", help="Workspace to publish; repeat for multiple courses. Defaults to demo-workspace plus courses/*/MISSION.md.")
+    parser.add_argument("--output", type=Path, default=ROOT / "build/site")
+    args = parser.parse_args()
+    workspaces = args.workspace or [ROOT / "demo-workspace", *[path.parent for path in sorted((ROOT / "courses").glob("*/MISSION.md"))]]
+    workspaces = [path.resolve() for path in workspaces]
+    output = args.output.resolve()
+    # The generated directory is replaced on every build; never delete source content.
+    if output == ROOT or output in ROOT.parents or any(output == workspace or output in workspace.parents or workspace in output.parents for workspace in workspaces):
+        parser.error("Output must be separate from the workspaces and must not contain the repository.")
+    if output.exists() and not ((output / ".nojekyll").is_file() and (output / "course.json").is_file()):
+        parser.error("Refusing to replace a directory that is not a generated lesson site.")
+    if len({path.name for path in workspaces}) != len(workspaces):
+        parser.error("Course workspace folder names must be unique.")
+    for workspace in workspaces:
+        if not (workspace / "MISSION.md").is_file():
+            parser.error(f"Missing MISSION.md in {workspace}")
+    if output.exists():
+        shutil.rmtree(output)
+    shutil.copytree(ROOT / "site", output)
+    courses = []
+    for index, workspace in enumerate(workspaces):
+        # Keep the original course's published lesson URLs unchanged.
+        content_path = Path("content") if index == 0 else Path("content/courses") / workspace.name
+        courses.append(build_course(workspace, output, content_path))
+    (output / "course.json").write_text(json.dumps({"courses": courses}, ensure_ascii=False, indent=2), encoding="utf-8")
     (output / ".nojekyll").touch()
-    print(f"Built {len(pages)} pages → {output}")
+    print(f"Built {sum(len(course['pages']) for course in courses)} pages across {len(courses)} courses → {output}")
 
 
 if __name__ == "__main__":
