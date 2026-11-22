@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f6f5ef">
+  <title>Lesson reader</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#reader">Skip to content</a>
+  <aside id="sidebar" aria-label="Course sidebar">
+    <a class="brand" href="#"><span class="brand-icon" aria-hidden="true">↗</span> kindle-sync <span class="edition">LEARN</span></a>
+    <div class="course-heading"><p class="eyebrow">YOUR LEARNING SPACE</p><h1 id="course-title">Lesson reader</h1><p id="course-count"></p></div>
+    <nav id="navigation" aria-label="Course contents"></nav>
+    <div class="sidebar-footer"><span class="source-dot" aria-hidden="true"></span> Content lives in your repository</div>
+  </aside>
+  <button id="backdrop" aria-label="Close course menu" hidden></button>
+  <main>
+    <header>
+      <button id="menu-toggle" aria-label="Open course menu" aria-controls="sidebar" aria-expanded="false">☰</button>
+      <div class="breadcrumb"><span id="breadcrumb-course">Course</span><span aria-hidden="true">/</span><span id="current-section">Overview</span></div>
+      <span class="reader-label">LESSON READER</span>
+    </header>
+    <div id="notice" role="status">Loading your course…</div>
+    <iframe id="reader" title="Course content" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" hidden></iframe>
+    <footer id="page-navigation" aria-label="Page navigation" hidden>
+      <a id="previous" class="page-link"><span aria-hidden="true">←</span><span><small>PREVIOUS</small><span class="page-title"></span></span></a>
+      <span id="position" aria-live="polite"></span>
+      <a id="next" class="page-link"><span><small>NEXT</small><span class="page-title"></span></span><span aria-hidden="true">→</span></a>
+    </footer>
+  </main>
+  <noscript>This lesson reader needs JavaScript for navigation. You can also open the HTML lessons directly from the repository.</noscript>
+</body>
+</html>

@@ -13,6 +13,7 @@ dependencies = ["weasyprint>=60.0", "beautifulsoup4>=4.12", "keyring>=23"]
 
 [project.optional-dependencies]
 test = ["pytest", "pypdf"]
+site = ["Markdown>=3.6"]
 
 [project.scripts]
 kindle-sync = "kindle_sync:main"

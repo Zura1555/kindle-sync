@@ -110,8 +110,50 @@ kindle-sync build --workspace demo-workspace
 ## Development
 
 ```bash
-pip install -e ".[test]" && pytest
+pip install -e ".[test,site]" && pytest
 ```
+
+---
+
+## Browser Lesson Reader
+
+The static reader builds its sidebar directly from a learning workspace: `MISSION.md`
+becomes the overview, numbered `lessons/[0-9]*.html` files become lessons, `reference/*.html`
+become reference pages, and `RESOURCES.md` becomes the resources page. Lesson HTML, styling,
+and interactive quizzes are preserved inside a sandboxed viewer. No database, GitHub API
+token, or runtime backend is needed.
+
+To preview locally from a repository checkout:
+
+```bash
+pip install -e ".[site]"
+python scripts/build_site.py
+python -m http.server 8000 --directory build/site
+```
+
+Open the server in your browser. The reader includes a responsive sidebar, Previous/Next
+navigation, and shareable hash URLs that also work after a refresh on GitHub Pages.
+The lesson count and navigation update on each build. Use zero-padded filenames such as
+`0001-introduction.html` and `0002-next-topic.html` to control lesson order. The builder
+copies only the published Markdown pages, selected HTML files, and an optional workspace
+`assets/` directory; put lesson images there and reference them as `../assets/image.png`.
+Never put private files in published HTML or `assets/`. Credentials, learning records,
+and Kindle output are not included by the builder.
+
+### GitHub Pages
+
+1. In the repository's **Settings → Pages → Build and deployment**, select **GitHub Actions**.
+2. Push these changes to `main`. The **Lesson site** workflow builds `demo-workspace/`
+   and deploys the generated site to GitHub Pages. Pull requests build the site without deploying.
+3. Open the URL shown in the workflow's `github-pages` deployment environment.
+
+To publish a different workspace committed to the repository, change `--workspace demo-workspace`
+in `.github/workflows/pages.yml`. To build one locally, use
+`python scripts/build_site.py --workspace path/to/workspace --output build/site`.
+The output directory is replaced on rebuild; an existing non-generated directory is rejected.
+All reader URLs are relative, so repository subpaths and custom domains both work.
+Publishing makes the selected course content available to visitors of your Pages site;
+review it before deployment. Kindle sending remains a separate local CLI operation.
 
 ---
 
