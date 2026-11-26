@@ -4,6 +4,7 @@ kindle-sync: compile a /teach learning workspace into a Kindle book and email it
 
     kindle-sync setup   # one-time: Kindle address, sender, app password (hidden), format
     kindle-sync build   # lessons/*.html + reference/*.html -> lessons/kindle-output/<title>.epub
+                        # (book workspaces with BOOK.md: chapters/*.html -> chapters/kindle-output/)
     kindle-sync send    # email the built book to your Kindle
     kindle-sync sync    # build, then send if anything changed since the last submission to this Kindle
     kindle-sync sync --dry-run  # show what sync would do, without building, sending, or recording anything
@@ -32,10 +33,11 @@ import time
 import uuid
 import zipfile
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
+from urllib.parse import quote, unquote
 
 from bs4 import BeautifulSoup
 
@@ -81,6 +83,9 @@ li { margin-bottom: 3px; }
 .answer-key .q { font-weight: 600; margin: 0.8em 0 0.1em; }
 .answer-key .a { margin: 0 0 0.4em 0.8em; }
 .nav-links, .lesson-meta { display: none; }
+img, svg { max-width: 100%; height: auto; }
+figure { margin: 0.8em 0; text-align: center; page-break-inside: avoid; }
+figcaption { font-size: 0.85em; font-style: italic; color: #444; margin-top: 0.3em; }
 .toc ol, .toc ul { line-height: 1.8; }
 .toc a { text-decoration: none; }
 """
@@ -95,6 +100,8 @@ PDF_CSS = """
 @page :first { @bottom-center { content: none; } }
 body { font-size: 11pt; }
 .cover-title { text-align: center; font-size: 2em; margin-top: 1.6in; bookmark-level: none; }
+.cover-image { display: block; max-height: 3.6in; margin: 0.2in auto 0; }
+.cover-image + .cover-title { margin-top: 0.2in; }
 .toc, .chapter { break-before: page; }
 .toc a::after { content: leader(". ") target-counter(attr(href), page); }
 """
@@ -112,6 +119,7 @@ class Chapter:
     path: Path
     title: str
     body: object  # BeautifulSoup tag holding the chapter content
+    images: list = field(default_factory=list)  # image files the chapter shows, inside the workspace
 
 
 @dataclass
@@ -127,22 +135,34 @@ class Book:
 
     @property
     def out_dir(self):
-        return self.workspace / "lessons" / "kindle-output"
+        return content_dir(self.workspace) / "kindle-output"
+
+    @property
+    def cover(self):
+        """assets/cover.png (or .jpg), shown as the book's cover."""
+        return next((p for p in (self.workspace / "assets" / f"cover.{ext}" for ext in ("png", "jpg", "jpeg"))
+                     if p.is_file()), None)
 
 
 def fail(message):
     raise SystemExit(f"❌ {message}")
 
 
+def content_dir(workspace):
+    """Book workspaces (with BOOK.md) keep chapters in chapters/; /teach workspaces keep lessons in lessons/."""
+    return Path(workspace) / ("chapters" if (Path(workspace) / "BOOK.md").is_file() else "lessons")
+
+
 def book_title(workspace, override=None):
-    """--title, else `# Mission: <Topic>` in MISSION.md, else the workspace folder name."""
+    """--title, else `# Book: <Title>` in BOOK.md or `# Mission: <Topic>` in MISSION.md, else the folder name."""
     if override:
         return override
-    mission = workspace / "MISSION.md"
-    if mission.is_file():
-        m = re.search(r"^#\s*Mission\s*[:—–-]\s*(.+?)\s*$", mission.read_text(encoding="utf-8"), re.M)
-        if m and not m.group(1).startswith("["):
-            return m.group(1)
+    for name, word in (("BOOK.md", "Book"), ("MISSION.md", "Mission")):
+        path = workspace / name
+        if path.is_file():
+            m = re.search(rf"^#\s*{word}\s*[:—–-]\s*(.+?)\s*$", path.read_text(encoding="utf-8"), re.M)
+            if m and not m.group(1).startswith("["):
+                return m.group(1)
     return workspace.name.replace("-", " ").replace("_", " ").title()
 
 
@@ -200,7 +220,63 @@ def convert_quizzes(soup, body, legacy):
         body.append(section)
 
 
-def load_chapter(path, kind, chapter_id):
+# html.parser lowercases names, but SVG is case-sensitive in EPUB's XHTML: `viewbox` is ignored and
+# `lineargradient` is an unknown element. These are the camelCase names the HTML parsing spec restores.
+SVG_NAMES = {n.lower(): n for n in (
+    "altGlyph altGlyphDef altGlyphItem animateColor animateMotion animateTransform clipPath feBlend feColorMatrix "
+    "feComponentTransfer feComposite feConvolveMatrix feDiffuseLighting feDisplacementMap feDistantLight "
+    "feDropShadow feFlood feFuncA feFuncB feFuncG feFuncR feGaussianBlur feImage feMerge feMergeNode feMorphology "
+    "feOffset fePointLight feSpecularLighting feSpotLight feTile feTurbulence foreignObject glyphRef "
+    "linearGradient radialGradient textPath "
+    "attributeName attributeType baseFrequency baseProfile calcMode clipPathUnits diffuseConstant edgeMode "
+    "filterUnits gradientTransform gradientUnits kernelMatrix kernelUnitLength keyPoints keySplines keyTimes "
+    "lengthAdjust limitingConeAngle markerHeight markerUnits markerWidth maskContentUnits maskUnits numOctaves "
+    "pathLength patternContentUnits patternTransform patternUnits pointsAtX pointsAtY pointsAtZ preserveAlpha "
+    "preserveAspectRatio primitiveUnits refX refY repeatCount repeatDur requiredExtensions requiredFeatures "
+    "specularConstant specularExponent spreadMethod startOffset stdDeviation stitchTiles surfaceScale "
+    "systemLanguage tableValues targetX targetY textLength viewBox viewTarget xChannelSelector yChannelSelector "
+    "zoomAndPan").split()}
+IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+               ".svg": "image/svg+xml", ".webp": "image/webp"}
+
+
+def fix_svg(body):
+    for svg in body.find_all("svg"):
+        for tag in [svg, *svg.find_all(True)]:
+            tag.name = SVG_NAMES.get(tag.name, tag.name)
+            tag.attrs = {SVG_NAMES.get(k, k): v for k, v in tag.attrs.items()}
+        if any(k.startswith("xlink:") for tag in [svg, *svg.find_all(True)] for k in tag.attrs):
+            svg["xmlns:xlink"] = "http://www.w3.org/1999/xlink"
+
+
+def embed_images(soup, body, path, workspace):
+    """Point each <img> at its file's path in the workspace, which both formats embed. Books are built offline,
+    so an image that isn't a file in the workspace becomes its alt text."""
+    images = []
+    for img in body.find_all("img"):
+        src = img.get("src", "").strip()
+        if src.startswith("data:image/"):
+            continue
+        file = None
+        if src and not re.match(r"^([a-z][a-z0-9+.-]*:|//)", src, re.I):
+            file = (path.parent / unquote(src.split("#")[0].split("?")[0])).resolve()
+        if file and file.is_file() and file.is_relative_to(workspace) and file.suffix.lower() in IMAGE_TYPES:
+            img["src"] = quote(file.relative_to(workspace).as_posix())
+            img["alt"] = img.get("alt", "")
+            images.append(file)
+            continue
+        print(f"⚠️  {path.name}: image “{src}” is not an image file in the workspace; using its alt text instead.")
+        alt = img.get("alt", "").strip()
+        if alt:
+            em = soup.new_tag("em")
+            em.string = f"[{alt}]"
+            img.replace_with(em)
+        else:
+            img.decompose()
+    return images
+
+
+def load_chapter(path, kind, chapter_id, workspace):
     soup = BeautifulSoup(path.read_text(encoding="utf-8"), "html.parser")
     legacy = legacy_answers(" ".join(s.get_text() for s in soup.find_all("script")))
     page_title = soup.title.get_text(" ", strip=True) if soup.title else ""
@@ -211,22 +287,25 @@ def load_chapter(path, kind, chapter_id):
     for tag in body.find_all(True):
         for attr in [a for a in tag.attrs if a.lower().startswith("on")]:
             del tag[attr]
+    fix_svg(body)
+    images = embed_images(soup, body, path, workspace)
 
     h1 = body.find("h1")
     if h1 is None:
         h1 = soup.new_tag("h1")
         h1.string = page_title or path.stem.lstrip("0123456789-_").replace("-", " ").capitalize() or path.stem
         body.insert(0, h1)
-    return Chapter(chapter_id, kind, path, h1.get_text(" ", strip=True), body)
+    return Chapter(chapter_id, kind, path, h1.get_text(" ", strip=True), body, images)
 
 
 def load_book(workspace, title=None):
     workspace = Path(workspace).resolve()
-    sources = [("lesson", p) for p in sorted((workspace / "lessons").glob("[0-9]*.html"))]
+    folder = content_dir(workspace)
+    sources = [("lesson", p) for p in sorted(folder.glob("[0-9]*.html"))]
     sources += [("reference", p) for p in sorted((workspace / "reference").glob("*.html"))]
     if not sources:
-        fail(f"No lessons found in {workspace}/lessons. Run from a /teach workspace or pass --workspace.")
-    chapters = [load_chapter(p, kind, f"ch{i:02d}") for i, (kind, p) in enumerate(sources, 1)]
+        fail(f"No {folder.name} found in {folder}. Run from a /teach or book workspace or pass --workspace.")
+    chapters = [load_chapter(p, kind, f"ch{i:02d}", workspace) for i, (kind, p) in enumerate(sources, 1)]
     lang = "en"
     first = BeautifulSoup(sources[0][1].read_text(encoding="utf-8"), "html.parser").html
     if first is not None and first.get("lang"):
@@ -249,20 +328,28 @@ def link_chapters(book, href):
 
 # Identifies how books are rendered. Bump it when a change alters the built book, so unchanged lessons are sent
 # again with the fix. Releases that don't change the book leave it alone, so upgrading doesn't resend anything.
-RENDER_VERSION = 1
+RENDER_VERSION = 2  # 2: embeds images and keeps SVG case
+
+
+def book_files(book):
+    """Every file the book is built from: chapters, then the images they show and the cover."""
+    images = dict.fromkeys(img for ch in book.chapters for img in ch.images)
+    if book.cover:
+        images[book.cover.resolve()] = None
+    return [ch.path for ch in book.chapters] + sorted(images)
 
 
 def source_digest(book, fmt):
     h = hashlib.sha256(f"render-{RENDER_VERSION}\0{book.title}\0{fmt}".encode())
-    for ch in book.chapters:
-        h.update(ch.path.name.encode() + b"\0" + ch.path.read_bytes())
+    for path in book_files(book):
+        h.update(path.resolve().relative_to(book.workspace).as_posix().encode() + b"\0" + path.read_bytes())
     return h.hexdigest()
 
 
 def chapter_hashes(book):
-    """Each source file's hash by its path in the workspace, to list which lessons changed."""
-    return {ch.path.relative_to(book.workspace).as_posix(): hashlib.sha256(ch.path.read_bytes()).hexdigest()
-            for ch in book.chapters}
+    """Each source file's hash by its path in the workspace, to list which lessons and images changed."""
+    return {path.resolve().relative_to(book.workspace).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in book_files(book)}
 
 
 def render_pdf(book, out):
@@ -274,7 +361,7 @@ def render_pdf(book, out):
     link_chapters(book, lambda ch: f"#{ch.id}")
     esc = html.escape
     toc = ['<nav class="toc"><h2>Contents</h2>']
-    for kind, heading, tag in (("lesson", "Lessons", "ol"), ("reference", "Reference", "ul")):
+    for kind, heading, tag in (("lesson", content_dir(book.workspace).name.title(), "ol"), ("reference", "Reference", "ul")):
         items = [ch for ch in book.chapters if ch.kind == kind]
         if items:
             toc.append(f"<h3>{heading}</h3><{tag}>")
@@ -284,12 +371,15 @@ def render_pdf(book, out):
     doc = [
         f'<!DOCTYPE html><html lang="{esc(book.lang)}"><head><meta charset="utf-8">',
         f"<title>{esc(book.title)}</title><style>{BASE_CSS}{PDF_CSS}</style></head><body>",
+        f'<img class="cover-image" alt="" src="{quote(book.cover.relative_to(book.workspace).as_posix())}">'
+        if book.cover else "",
         f'<h1 class="cover-title">{esc(book.title)}</h1>',
         *toc,
         *(f'<section class="chapter" id="{ch.id}">{ch.body.decode_contents()}</section>' for ch in book.chapters),
         "</body></html>",
     ]
-    weasyprint.HTML(string="\n".join(doc), base_url=str(book.workspace)).write_pdf(str(out))
+    # Image paths are relative to the workspace root (see embed_images).
+    weasyprint.HTML(string="\n".join(doc), base_url=book.workspace.as_uri() + "/").write_pdf(str(out))
 
 
 def xhtml(title, lang, body):
@@ -314,8 +404,15 @@ def render_epub(book, out):
         + [f'<li><a href="{ch.id}.xhtml">{esc(ch.title)}</a></li>' for ch in book.chapters]
         + ["</ol></nav>"]
     )
+    # Images keep their path in the workspace, relative to the chapters, so the <img> paths need no change.
+    images = {p.resolve().relative_to(book.workspace).as_posix(): p for p in book_files(book)[len(book.chapters):]}
+    cover = book.cover and book.cover.resolve().relative_to(book.workspace).as_posix()
     manifest = "\n".join(
-        f'<item id="{ch.id}" href="{ch.id}.xhtml" media-type="application/xhtml+xml"/>' for ch in book.chapters
+        [f'<item id="{ch.id}" href="{ch.id}.xhtml" media-type="application/xhtml+xml"'
+         + (' properties="svg"/>' if ch.body.find("svg") else "/>") for ch in book.chapters]
+        + [f'<item id="{"cover-image" if name == cover else f"img{i}"}" href="{esc(quote(name))}" '
+           f'media-type="{IMAGE_TYPES[Path(name).suffix.lower()]}"'
+           + (' properties="cover-image"/>' if name == cover else "/>") for i, name in enumerate(images, 1)]
     )
     spine = "\n".join(f'<itemref idref="{ch.id}"/>' for ch in book.chapters)
     modified = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -326,6 +423,7 @@ def render_epub(book, out):
 <dc:title>{esc(book.title)}</dc:title>
 <dc:language>{esc(book.lang)}</dc:language>
 <meta property="dcterms:modified">{modified}</meta>
+{'<meta name="cover" content="cover-image"/>' if cover else ""}
 </metadata>
 <manifest>
 <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
@@ -352,13 +450,16 @@ def render_epub(book, out):
         for ch in book.chapters:
             z.writestr(f"OEBPS/{ch.id}.xhtml", xhtml(ch.title, book.lang, ch.body.decode_contents()),
                        compress_type=zipfile.ZIP_DEFLATED)
+        for name, path in images.items():
+            z.write(path, f"OEBPS/{name}", compress_type=zipfile.ZIP_DEFLATED)
 
 
 def build(book, fmt):
     book.out_dir.mkdir(parents=True, exist_ok=True)
     out = book.out_dir / f"{book.slug}.{fmt}"
     lessons = sum(ch.kind == "lesson" for ch in book.chapters)
-    print(f"🔨 Building {fmt.upper()} “{book.title}” from {lessons} lessons + {len(book.chapters) - lessons} references...")
+    print(f"🔨 Building {fmt.upper()} “{book.title}” from {lessons} {content_dir(book.workspace).name} + "
+          f"{len(book.chapters) - lessons} references...")
     (render_pdf if fmt == "pdf" else render_epub)(book, out)
     print(f"✅ Written: {out} ({out.stat().st_size / 1024:.1f} KB)")
     return out
@@ -516,7 +617,7 @@ def format_choice(choice, cfg, workspace):
         return choice, "--format"
     if cfg["FORMAT"].lower() in FORMATS:
         return cfg["FORMAT"].lower(), f"FORMAT in {cfg.sources['FORMAT']}"
-    if (workspace / "lessons" / "kindle-output" / ".last-sent-pdf").is_file():
+    if (content_dir(workspace) / "kindle-output" / ".last-sent-pdf").is_file():
         return "pdf", "earlier PDF syncs in this workspace"
     return "epub", "default"
 
@@ -873,7 +974,7 @@ def cmd_send(args, workspace):
     cfg = load_config(workspace, args.to)
     require_send_config(cfg)
     title = book_title(workspace, args.title)
-    out_dir = workspace / "lessons" / "kindle-output"
+    out_dir = content_dir(workspace) / "kindle-output"
     if args.file:
         path, fmt = args.file.resolve(), args.file.suffix.lower().lstrip(".")
         if fmt not in FORMATS:
@@ -958,7 +1059,7 @@ def cmd_sync(args, workspace):
 
 
 def cmd_resolve(args, workspace):
-    out_dir = workspace / "lessons" / "kindle-output"
+    out_dir = content_dir(workspace) / "kindle-output"
     if not read_json(out_dir / STATE_FILE).get("unknown"):
         print("No submissions with an unknown outcome in this workspace.")
         return
@@ -1193,9 +1294,9 @@ def cmd_doctor(args, workspace):
         report("ok", "PDF output: WeasyPrint is usable")
     except (ImportError, OSError) as e:
         report("error" if fmt == "pdf" else "info", f"PDF output: WeasyPrint is not usable ({e}); EPUB output still works")
-    lessons = list((workspace / "lessons").glob("[0-9]*.html"))
-    report("ok" if lessons else "warn", f"Workspace {workspace}: {len(lessons)} lessons")
-    for record in read_json(workspace / "lessons" / "kindle-output" / STATE_FILE).get("unknown", {}).values():
+    lessons = list(content_dir(workspace).glob("[0-9]*.html"))
+    report("ok" if lessons else "warn", f"Workspace {workspace}: {len(lessons)} {content_dir(workspace).name}")
+    for record in read_json(content_dir(workspace) / "kindle-output" / STATE_FILE).get("unknown", {}).values():
         report("warn", f"Outcome unknown for {record['file']} → {record['destination']} "
                        f"({local_time(record['at'])}); see `kindle-sync status`")
 
@@ -1224,7 +1325,7 @@ RESULT_LABELS = {
 
 def cmd_status(args, workspace):
     cfg = load_config(workspace)
-    state = read_json(workspace / "lessons" / "kindle-output" / STATE_FILE)
+    state = read_json(content_dir(workspace) / "kindle-output" / STATE_FILE)
     for record in state.get("unknown", {}).values():
         print(f"⚠️  OUTCOME UNKNOWN: {record['file']} → {record['destination']} on {local_time(record['at'])}\n"
               "   The connection broke while submitting, so it may or may not have gone out, and `sync` won't\n"
@@ -1263,7 +1364,7 @@ def main(argv=None):
     workspace_arg.add_argument("-w", "--workspace", type=Path, default=Path.cwd(), help="workspace root (default: current directory)")
     common = argparse.ArgumentParser(add_help=False, parents=[workspace_arg])
     common.add_argument("-f", "--format", choices=FORMATS, help="book format (default: FORMAT from setup, else epub)")
-    common.add_argument("--title", help="book title (default: `# Mission: <Topic>` in MISSION.md, else the folder name)")
+    common.add_argument("--title", help="book title (default: `# Book: <Title>` in BOOK.md or `# Mission: <Topic>` in MISSION.md, else the folder name)")
     to_arg = argparse.ArgumentParser(add_help=False)
     to_arg.add_argument("--to", metavar="EMAIL", help="send to this Kindle address instead of KINDLE_EMAIL")
     retry_arg = argparse.ArgumentParser(add_help=False)

@@ -5,7 +5,7 @@ description: Compiles a /teach learning workspace's lessons and reference docs i
 
 # Kindle Sync
 
-Compile every `lessons/[0-9]*.html` and `reference/*.html` in a /teach workspace into one Kindle book and submit it by email to the user's Send-to-Kindle address.
+Compile every `lessons/[0-9]*.html` and `reference/*.html` in a /teach workspace into one Kindle book and submit it by email to the user's Send-to-Kindle address. In a /book workspace (one with `BOOK.md`), it compiles `chapters/[0-9]*.html` instead, into `chapters/kindle-output/`.
 
 If `kindle-sync` is not installed, run any command below as `uvx --from git+https://github.com/zura1555/kindle-sync kindle-sync <command>`.
 

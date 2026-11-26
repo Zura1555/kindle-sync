@@ -37,6 +37,7 @@ async function init() {
   const navigation = document.querySelector('#navigation');
   let course;
   let lessons;
+  let unit;
 
   courseSelect.addEventListener('change', () => {
     const selected = courses.find(item => item.id === courseSelect.value);
@@ -49,12 +50,13 @@ async function init() {
 
   function renderCourse(selected) {
     course = selected;
-    lessons = course.pages.filter(page => page.section === 'Lessons');
+    unit = course.unit || 'Lessons';
+    lessons = course.pages.filter(page => page.section === unit);
     const topics = [...new Set(lessons.map(page => page.topic))];
     courseSelect.value = course.id;
     document.querySelector('#course-title').textContent = course.title;
     document.querySelector('#breadcrumb-course').textContent = course.title;
-    document.querySelector('#course-count').textContent = `${lessons.length} ${lessons.length === 1 ? 'lesson' : 'lessons'} · ${topics.length} ${topics.length === 1 ? 'topic' : 'topics'}`;
+    document.querySelector('#course-count').textContent = `${lessons.length} ${(lessons.length === 1 ? unit.slice(0, -1) : unit).toLowerCase()} · ${topics.length} ${topics.length === 1 ? 'topic' : 'topics'}`;
     topicSelect.replaceChildren(new Option('Choose a topic', ''), ...topics.map(topic => new Option(topic, topic)));
     topicSelect.options[0].disabled = true;
     document.querySelector('#topic-control').hidden = !topics.length;
@@ -69,7 +71,7 @@ async function init() {
         navigation.append(heading);
         lastSection = page.section;
       }
-      if (page.section === 'Lessons' && page.topic !== lastTopic) {
+      if (page.section === unit && page.topic !== lastTopic) {
         if (topics.length > 1 || page.topic !== 'General') {
           const heading = document.createElement('h3');
           heading.textContent = page.topic;
@@ -81,7 +83,7 @@ async function init() {
       link.href = `#${encodeURIComponent(page.path)}`;
       const number = document.createElement('span');
       number.className = 'nav-number';
-      number.textContent = page.section === 'Lessons' ? String(++lessonNumber).padStart(2, '0') : '—';
+      number.textContent = page.section === unit ? String(++lessonNumber).padStart(2, '0') : '—';
       const title = document.createElement('span');
       title.textContent = page.title;
       link.append(number, title);
@@ -90,7 +92,7 @@ async function init() {
     if (!lessons.length) {
       const empty = document.createElement('p');
       empty.className = 'empty';
-      empty.textContent = 'No lessons yet. Add numbered HTML files to lessons/ and rebuild.';
+      empty.textContent = `No ${unit.toLowerCase()} yet. Add numbered HTML files to ${unit.toLowerCase()}/ and rebuild.`;
       navigation.append(empty);
     }
   }
@@ -103,7 +105,7 @@ async function init() {
     const page = course.pages[current];
     topicSelect.value = page.topic || '';
     document.title = `${page.title} · ${course.title}`;
-    document.querySelector('#current-section').textContent = page.section === 'Lessons' ? `${page.topic === 'General' ? '' : page.topic + ' · '}Lesson ${lessons.indexOf(page) + 1}` : page.title;
+    document.querySelector('#current-section').textContent = page.section === unit ? `${page.topic === 'General' ? '' : page.topic + ' · '}${unit.slice(0, -1)} ${lessons.indexOf(page) + 1}` : page.title;
     navigation.querySelectorAll('a').forEach(link => {
       if (link.hash === `#${encodeURIComponent(page.path)}`) link.setAttribute('aria-current', 'page');
       else link.removeAttribute('aria-current');

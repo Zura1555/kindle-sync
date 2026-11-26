@@ -20,9 +20,11 @@ Built for [Matt Pocock's skills-for-AI-agents](https://github.com/mattpocock/ski
 | | |
 |---|---|
 | `skills/teach/SKILL.md` | Agent skill: generates interactive lessons |
+| `skills/book/SKILL.md` | Agent skill: plans a book and writes it chapter by chapter, with diagrams and images |
 | `skills/kindle-sync/SKILL.md` | Agent skill: syncs lessons to Kindle |
 | `kindle_sync.py` | The `kindle-sync` CLI: builds the book (EPUB or PDF) and emails it |
 | `workspace-template/` | Scaffolding: copy it to start learning anything |
+| `book-template/` | Scaffolding for book mode |
 | `demo-workspace/` | Working example: a PostgreSQL lesson, ready to sync |
 
 ---
@@ -34,8 +36,8 @@ Built for [Matt Pocock's skills-for-AI-agents](https://github.com/mattpocock/ski
 uv tool install git+https://github.com/zura1555/kindle-sync   # or: pipx install git+https://github.com/zura1555/kindle-sync
 
 # 2. Install the skills into your agent's skills directory
-cp -r skills/teach skills/kindle-sync ~/.claude/skills/        # Claude Code
-cp -r skills/teach skills/kindle-sync ~/.config/agents/skills/ # Amp
+cp -r skills/teach skills/book skills/kindle-sync ~/.claude/skills/        # Claude Code
+cp -r skills/teach skills/book skills/kindle-sync ~/.config/agents/skills/ # Amp
 
 # 3. Scaffold a workspace
 cp -r workspace-template ~/my-learning && cd ~/my-learning
@@ -92,9 +94,29 @@ To see where each setting comes from, run `kindle-sync doctor` or `kindle-sync s
 - **Updates:** each send delivers a new copy of the whole book. Your Kindle may keep it as a separate document, and highlights, notes, and reading position from the earlier copy may not carry over. `sync` says so before it resends a book, and `--dry-run` shows it in advance.
 - **Formats:** EPUB is the default: reflowable, so font size, dictionary, and highlights work on the Kindle. `--format pdf` (or `FORMAT=pdf` in setup) makes a 4.5×6in PDF with a clickable contents page; it needs Pango (Ubuntu: `sudo apt install libpango-1.0-0 libpangoft2-1.0-0`, macOS: `brew install pango`). Workspaces that synced PDFs before 0.3.0 keep PDF until you choose a format.
 - **Title:** taken from `# Mission: <Topic>` in `MISSION.md`. Override it with `--title`.
+- **Images:** `<img>` files inside the workspace (PNG, JPEG, GIF, WebP, SVG) are embedded in both formats; inline `<svg>` diagrams are kept.
 - **Quizzes:** scripts are stripped, quiz options become a lettered list, and the answers move to an answer key at the end of each chapter, so you can still practise retrieval offline.
 
 Lessons follow a structured pedagogy: knowledge first, an interactive quiz with immediate feedback, a primary source citation, and a reminder to ask the agent follow-up questions.
+
+---
+
+## Book Mode
+
+`/book` writes a book you read on Kindle, one chapter at a time.
+
+```bash
+cp -r book-template ~/my-book && cd ~/my-book
+/book about how database indexes work   # Agent writes the outline in BOOK.md and asks you to review it
+/book next chapter                       # One chapter per session; repeat as the book grows
+kindle-sync sync                         # Sends the chapters written so far
+```
+
+A workspace with `BOOK.md` is a book workspace: kindle-sync compiles `chapters/[0-9]*.html` (then `reference/*.html`) into `chapters/kindle-output/`, and takes the title from `# Book: <Title>`. `BOOK.md` holds the outline as a checklist, one line and goal per chapter, plus running notes that keep later chapters consistent.
+
+- **Diagrams** are inline SVG: crisp on e-ink, no files, nothing fetched at build time.
+- **Images**, such as illustrations the agent generates with an image tool (Amp's Painter), go in `assets/` and are referenced as `../assets/name.png` from a chapter. Both EPUB and PDF embed them, and the browser reader shows them. `assets/cover.png` becomes the book cover. An image that isn't a file in the workspace, such as a remote URL, is replaced by its alt text with a warning. Changing an image makes `sync` send the book again.
+- The browser reader publishes book workspaces too: put one under `courses/<name>/` with its `BOOK.md`, and it appears with a **Chapters** section.
 
 ---
 
@@ -144,7 +166,7 @@ and Kindle output are not included by the builder.
 ### Courses and Topics
 
 The default build publishes `demo-workspace/` plus every course folder containing
-`courses/<course-name>/MISSION.md`. Each course uses the same workspace layout:
+`courses/<course-name>/MISSION.md` or `BOOK.md`. Each course uses the same workspace layout:
 `MISSION.md`, numbered HTML files in `lessons/`, optional `reference/`, `RESOURCES.md`,
 and `assets/`. The course title comes from `# Mission: <Title>` in its `MISSION.md`.
 Adding a course folder and pushing it to `main` makes it appear in the course dropdown.

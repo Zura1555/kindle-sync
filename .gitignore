@@ -1,5 +1,6 @@
 .kindle-creds
 lessons/kindle-output/
+chapters/kindle-output/
 __pycache__/
 *.pyc
 *.egg-info/

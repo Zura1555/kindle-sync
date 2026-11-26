@@ -495,3 +495,65 @@ def test_doctor_check_login_reports_auth_rejection(demo, creds, capsys):
         kindle_sync.main(["doctor", "-w", str(demo), "--check-login"])
     assert "Authentication rejected" in capsys.readouterr().out
     assert FakeSMTP.sent == []
+
+
+def png(width, height):
+    import struct
+    import zlib
+    chunk = lambda kind, data: struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    raw = b"".join(b"\0" + b"\x80\x80\x80" * width for _ in range(height))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+@pytest.fixture
+def book(tmp_path):
+    ws = tmp_path / "my-book"
+    (ws / "chapters").mkdir(parents=True)
+    (ws / "assets").mkdir()
+    (ws / "BOOK.md").write_text("# Book: How Indexes Work\n\n## Chapters\n- [x] 01. Pages\n")
+    (ws / "MISSION.md").write_text("# Mission: Not the title\n")
+    (ws / "assets/cover.png").write_bytes(png(16, 24))
+    (ws / "assets/01 catalog.png").write_bytes(png(40, 20))
+    (ws / "chapters/01-pages.html").write_text(
+        """<html><body><h1>Pages</h1>
+<figure><img src="../assets/01%20catalog.png" alt="Card catalog"><figcaption>A catalog</figcaption></figure>
+<img src="https://example.com/remote.png" alt="Remote picture">
+<svg viewBox="0 0 100 50"><defs><linearGradient id="g"/></defs><rect width="100" height="50" fill="url(#g)"/></svg>
+</body></html>""", encoding="utf-8")
+    return ws
+
+
+def test_book_workspace_embeds_images_and_svg_in_epub(book, capsys):
+    kindle_sync.main(["build", "-w", str(book), "-f", "epub"])
+    assert "remote.png" in capsys.readouterr().out  # warned, not fetched
+    with zipfile.ZipFile(book / "chapters/kindle-output/how-indexes-work.epub") as z:
+        names = set(z.namelist())
+        chapter, opf = z.read("OEBPS/ch01.xhtml").decode(), z.read("OEBPS/content.opf").decode()
+        assert z.read("OEBPS/assets/01 catalog.png") == (book / "assets/01 catalog.png").read_bytes()
+    assert "OEBPS/assets/cover.png" in names
+    ET.fromstring(chapter.encode())
+    # The image resolves from the chapter to a packaged file, and SVG keeps its case-sensitive names.
+    assert 'src="assets/01%20catalog.png"' in chapter
+    assert "viewBox=" in chapter and "<linearGradient" in chapter
+    assert "[Remote picture]" in chapter and "example.com" not in chapter
+    assert 'href="assets/01%20catalog.png" media-type="image/png"' in opf
+    assert 'properties="cover-image"' in opf and 'properties="svg"' in opf
+    assert "<dc:title>How Indexes Work</dc:title>" in opf
+
+
+def test_book_pdf_embeds_cover_and_chapter_images(book):
+    kindle_sync.main(["build", "-w", str(book), "-f", "pdf"])
+    pages = PdfReader(book / "chapters/kindle-output/how-indexes-work.pdf").pages
+    sizes = {tuple(image.image.size) for page in pages for image in page.images}
+    assert {(16, 24), (40, 20)} <= sizes
+    assert "Chapters" in pages[1].extract_text()
+
+
+def test_changing_an_image_resends_the_book(book, creds):
+    kindle_sync.main(["sync", "-w", str(book)])
+    kindle_sync.main(["sync", "-w", str(book)])
+    assert len(FakeSMTP.sent) == 1
+    (book / "assets/01 catalog.png").write_bytes(png(41, 20))
+    kindle_sync.main(["sync", "-w", str(book)])
+    assert len(FakeSMTP.sent) == 2

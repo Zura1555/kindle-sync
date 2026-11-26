@@ -137,3 +137,24 @@ def test_build_refuses_to_delete_source_or_unrelated_files(tmp_path, destination
     assert result.returncode != 0
     assert keep.read_text() == "Keep me"
     assert mission.read_text() == "# Mission: Keep me"
+
+
+def test_book_workspace_publishes_chapters_and_images(tmp_path):
+    workspace = tmp_path / "book"
+    (workspace / "chapters").mkdir(parents=True)
+    (workspace / "assets").mkdir()
+    (workspace / "BOOK.md").write_text("# Book: Indexes\n\n## Chapters\n- [x] 01. Pages")
+    (workspace / "assets/figure.png").write_bytes(b"png")
+    (workspace / "chapters/01-pages.html").write_text('<h1>Pages</h1><img src="../assets/figure.png">')
+    (workspace / "chapters/kindle-output").mkdir()
+    (workspace / "chapters/kindle-output/book.html").write_text("Private output")
+    output = tmp_path / "site"
+    result = build(workspace, output)
+    assert result.returncode == 0, result.stderr
+    course = json.loads((output / "course.json").read_text())["courses"][0]
+    assert course["title"] == "Indexes" and course["unit"] == "Chapters"
+    assert [(page["title"], page["section"]) for page in course["pages"]] == [("Overview", "Course"), ("Pages", "Chapters")]
+    chapter = output / course["pages"][1]["path"]
+    image = BeautifulSoup(chapter.read_text(), "html.parser").img["src"]
+    assert (chapter.parent / image).resolve().read_bytes() == b"png"
+    assert not (output / "content/chapters/kindle-output").exists()
