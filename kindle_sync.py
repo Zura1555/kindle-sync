@@ -415,7 +415,13 @@ def render_epub(book, out):
            + (' properties="cover-image"/>' if name == cover else "/>") for i, name in enumerate(images, 1)]
     )
     spine = "\n".join(f'<itemref idref="{ch.id}"/>' for ch in book.chapters)
-    modified = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Rebuilding unchanged lessons gives the same bytes, so a resend looks like the same document to Send to Kindle:
+    # the identifier comes from the title (like the file name), and the modified date and the zip entries' dates
+    # come from the newest source file rather than the clock. (`kindle-sync test` documents have no files.)
+    stamp = max((datetime.fromtimestamp(p.stat().st_mtime, timezone.utc) for p in book_files(book) if p.is_file()),
+                default=datetime.now(timezone.utc))
+    stamp = max(stamp, datetime(1980, 1, 1, tzinfo=timezone.utc)).replace(microsecond=0)  # zip dates start in 1980
+    modified = stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
     opf = f"""<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid" xml:lang="{esc(book.lang)}">
 <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
@@ -442,16 +448,20 @@ def render_epub(book, out):
 </container>
 """
     with zipfile.ZipFile(out, "w") as z:
-        z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
-        z.writestr("META-INF/container.xml", container, compress_type=zipfile.ZIP_DEFLATED)
-        z.writestr("OEBPS/content.opf", opf, compress_type=zipfile.ZIP_DEFLATED)
-        z.writestr("OEBPS/style.css", BASE_CSS, compress_type=zipfile.ZIP_DEFLATED)
-        z.writestr("OEBPS/nav.xhtml", xhtml(book.title, book.lang, nav), compress_type=zipfile.ZIP_DEFLATED)
+        def put(name, data, compress=zipfile.ZIP_DEFLATED):
+            info = zipfile.ZipInfo(name, stamp.timetuple()[:6])
+            info.external_attr = 0o644 << 16
+            z.writestr(info, data, compress_type=compress)
+
+        put("mimetype", "application/epub+zip", zipfile.ZIP_STORED)
+        put("META-INF/container.xml", container)
+        put("OEBPS/content.opf", opf)
+        put("OEBPS/style.css", BASE_CSS)
+        put("OEBPS/nav.xhtml", xhtml(book.title, book.lang, nav))
         for ch in book.chapters:
-            z.writestr(f"OEBPS/{ch.id}.xhtml", xhtml(ch.title, book.lang, ch.body.decode_contents()),
-                       compress_type=zipfile.ZIP_DEFLATED)
+            put(f"OEBPS/{ch.id}.xhtml", xhtml(ch.title, book.lang, ch.body.decode_contents()))
         for name, path in images.items():
-            z.write(path, f"OEBPS/{name}", compress_type=zipfile.ZIP_DEFLATED)
+            put(f"OEBPS/{name}", path.read_bytes())
 
 
 def build(book, fmt):

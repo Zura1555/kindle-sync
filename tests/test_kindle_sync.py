@@ -542,6 +542,35 @@ def test_book_workspace_embeds_images_and_svg_in_epub(book, capsys):
     assert "<dc:title>How Indexes Work</dc:title>" in opf
 
 
+def test_rebuilt_epub_keeps_its_file_name_and_identifier(book):
+    """Send to Kindle matches a resend to the earlier document by file name and metadata, so an unchanged book
+    must rebuild byte for byte, and a renamed book must look like a different document."""
+    import os
+    for path in [*(book / "chapters").iterdir(), *(book / "assets").iterdir()]:
+        os.utime(path, (978_307_200, 978_307_200))  # 2001-01-01, so the clock can't pass for the source date
+    out = book / "chapters/kindle-output"
+    epubs = []
+    for _ in range(2):
+        kindle_sync.main(["build", "-w", str(book), "-f", "epub"])
+        assert [p.name for p in out.glob("*.epub")] == ["how-indexes-work.epub"]
+        epubs.append((out / "how-indexes-work.epub").read_bytes())
+    assert epubs[0] == epubs[1]
+
+    def identity(path):
+        with zipfile.ZipFile(path) as z:
+            assert {i.date_time for i in z.infolist()} == {(2001, 1, 1, 0, 0, 0)}
+            opf = ET.fromstring(z.read("OEBPS/content.opf"))
+        ns = {"opf": "http://www.idpf.org/2007/opf", "dc": "http://purl.org/dc/elements/1.1/"}
+        assert opf.find("opf:metadata/opf:meta[@property='dcterms:modified']", ns).text == "2001-01-01T00:00:00Z"
+        return opf.find("opf:metadata/dc:identifier", ns).text
+
+    first = identity(out / "how-indexes-work.epub")
+    (book / "BOOK.md").write_text("# Book: How Indexes Really Work\n")
+    kindle_sync.main(["build", "-w", str(book), "-f", "epub"])
+    second = identity(out / "how-indexes-really-work.epub")
+    assert first.startswith("urn:uuid:") and second.startswith("urn:uuid:") and first != second
+
+
 def test_book_pdf_embeds_cover_and_chapter_images(book):
     kindle_sync.main(["build", "-w", str(book), "-f", "pdf"])
     pages = PdfReader(book / "chapters/kindle-output/how-indexes-work.pdf").pages
